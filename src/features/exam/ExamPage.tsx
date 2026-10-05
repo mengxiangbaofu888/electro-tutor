@@ -58,10 +58,12 @@ export function ExamPage() {
     setPaper(p ?? null);
     if (p) {
       const qs = (await db.questions.bulkGet(p.questionIds)).filter(Boolean) as Question[];
-      setQuestions(qs);
-      // 恢复上次的草稿（也可能是上次交卷失败时留下的部分批改结果）
+      // 先把草稿读出来，再和题目一起 setState。
+      // 中间夹一个 await 的话，题目会先渲染一帧、已选的选项稍后才出现——
+      // 用户会看到一闪，测试也会在这个窗口里读到未选中的状态。
       const restored = await loadDraftAnswers(a.id);
       draftRef.current = restored;
+      setQuestions(qs);
       setDraft(restored);
     }
   }, [attemptId]);
