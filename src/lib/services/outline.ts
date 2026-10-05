@@ -148,14 +148,40 @@ export async function listOutlines(): Promise<Outline[]> {
   return all.sort((a, b) => b.createdAt - a.createdAt);
 }
 
-/** 删除大纲时一并清掉知识点与它们的掌握度记录 */
+/**
+ * 删除大纲：连同它的知识点、掌握度记录、题目、错题本条目一起清掉。
+ *
+ * 为什么题目也必须删：题目的归属完全依赖知识点（掌握度、薄弱点、复习排程都挂在
+ * knowledgePointId 上）。知识点没了，题就成了没有归属的孤儿——掌握度永远统计不到，
+ * 而界面上又没有"题目管理"入口，用户永远清理不掉，只能看着题库越来越脏。
+ */
 export async function deleteOutline(outlineId: ID): Promise<void> {
-  await db.transaction('rw', db.outlines, db.knowledgePoints, db.mastery, async () => {
-    const points = await db.knowledgePoints.where('outlineId').equals(outlineId).toArray();
-    await db.mastery.bulkDelete(points.map((p) => p.id));
-    await db.knowledgePoints.bulkDelete(points.map((p) => p.id));
-    await db.outlines.delete(outlineId);
-  });
+  await db.transaction(
+    'rw',
+    db.outlines,
+    db.knowledgePoints,
+    db.mastery,
+    db.questions,
+    db.mistakes,
+    async () => {
+      const points = await db.knowledgePoints.where('outlineId').equals(outlineId).toArray();
+      const pointIds = points.map((p) => p.id);
+
+      const questions = await db.questions.where('outlineId').equals(outlineId).toArray();
+      const questionIds = questions.map((q) => q.id);
+
+      // 错题本里指向这些题的条目也要清掉，否则会留下指向不存在题目的记录
+      if (questionIds.length) {
+        const notes = await db.mistakes.where('questionId').anyOf(questionIds).toArray();
+        await db.mistakes.bulkDelete(notes.map((n) => n.id));
+      }
+
+      await db.questions.bulkDelete(questionIds);
+      await db.mastery.bulkDelete(pointIds);
+      await db.knowledgePoints.bulkDelete(pointIds);
+      await db.outlines.delete(outlineId);
+    },
+  );
 }
 
 /** 手动新增知识点（用户增删改） */
@@ -188,9 +214,15 @@ export async function updateKnowledgePoint(id: ID, patch: Partial<KnowledgePoint
   await db.knowledgePoints.update(id, patch);
 }
 
-/** 删除知识点（连带其子节点） */
+/**
+ * 删除知识点（连带其子节点）。
+ *
+ * 题目本身**不删**——用户可能只是重整大纲结构，删掉他辛苦生成（还花了 token）的题
+ * 是不可接受的。但必须把题目上对这些知识点的引用摘掉，否则会留下指向不存在节点的
+ * 悬空 id，界面会显示成"未知知识点"，掌握度也永远统计不到。
+ */
 export async function removeKnowledgePoint(id: ID): Promise<void> {
-  await db.transaction('rw', db.knowledgePoints, db.mastery, async () => {
+  await db.transaction('rw', db.knowledgePoints, db.mastery, db.questions, async () => {
     const all = await db.knowledgePoints.toArray();
     const toDelete = new Set<ID>([id]);
     let grew = true;
@@ -204,6 +236,18 @@ export async function removeKnowledgePoint(id: ID): Promise<void> {
       }
     }
     const ids = [...toDelete];
+
+    // 摘掉题目上的引用（命中的题目必然至少引用了一个被删的点，所以一定会变）
+    const affected = await db.questions.where('knowledgePointIds').anyOf(ids).toArray();
+    if (affected.length) {
+      await db.questions.bulkPut(
+        affected.map((q) => ({
+          ...q,
+          knowledgePointIds: q.knowledgePointIds.filter((pid) => !toDelete.has(pid)),
+        })),
+      );
+    }
+
     await db.knowledgePoints.bulkDelete(ids);
     await db.mastery.bulkDelete(ids);
   });

@@ -199,7 +199,7 @@ export function OutlineDetailPage() {
               className="tree-toggle"
               title="删除"
               onClick={async () => {
-                if (!confirm(`删除「${node.name}」及其所有子知识点？`)) return;
+                if (!confirm(`删除「${node.name}」及其所有子知识点？\n\n相关题目会保留，只是不再关联这些知识点。`)) return;
                 await removeKnowledgePoint(node.id);
                 await load();
               }}

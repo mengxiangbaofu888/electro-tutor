@@ -279,7 +279,7 @@ export function OutlineListPage() {
                       size="sm"
                       variant="danger"
                       onClick={async () => {
-                        if (!confirm(`删除大纲「${o.title}」？相关的知识点和掌握度记录也会一起删掉。`)) return;
+                        if (!confirm(`删除大纲「${o.title}」？\n\n这份大纲下的知识点、题目、错题记录和学习进度都会一起删掉，无法恢复。`)) return;
                         await deleteOutline(o.id);
                         await load();
                       }}

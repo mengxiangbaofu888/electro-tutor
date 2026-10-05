@@ -1,0 +1,229 @@
+/**
+ * 大纲增删改的测试。
+ *
+ * 重点在删除时的数据完整性——这类问题平时不显，但一旦发生就会留下一堆
+ * 用户既看不懂、又清不掉的脏数据：
+ *   · 删了大纲，题目还在题库里飘着（没有知识点归属 → 掌握度永远统计不到，
+ *     而界面又没有"题目管理"入口）
+ *   · 删了知识点，题目上留下指向不存在节点的悬空 id（界面显示"未知知识点"）
+ */
+import { beforeEach, describe, expect, it } from 'vitest';
+import { db, newId } from '../db/db';
+import type {
+  ID,
+  KnowledgePoint,
+  MistakeNote,
+  Outline,
+  Question,
+  TrackId,
+} from '../db/types';
+import { createMastery } from '../srs';
+import { deleteOutline, removeKnowledgePoint } from './outline';
+
+/* ------------------------------ 造数据 ------------------------------ */
+
+async function clearAll() {
+  await db.transaction(
+    'rw',
+    [db.outlines, db.knowledgePoints, db.questions, db.mastery, db.mistakes, db.papers],
+    async () => {
+      await db.outlines.clear();
+      await db.knowledgePoints.clear();
+      await db.questions.clear();
+      await db.mastery.clear();
+      await db.mistakes.clear();
+      await db.papers.clear();
+    },
+  );
+}
+
+async function makeOutline(title: string, track: TrackId = 'fundamental'): Promise<Outline> {
+  const outline: Outline = {
+    id: newId(),
+    title,
+    track,
+    materialIds: [],
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  await db.outlines.put(outline);
+  return outline;
+}
+
+async function makePoint(
+  outlineId: ID,
+  name: string,
+  options: { parentId?: ID; order?: number; depth?: number } = {},
+): Promise<KnowledgePoint> {
+  const point: KnowledgePoint = {
+    id: newId(),
+    outlineId,
+    parentId: options.parentId,
+    name,
+    summary: '',
+    importance: 3,
+    order: options.order ?? 0,
+    depth: options.depth ?? 1,
+  };
+  await db.knowledgePoints.put(point);
+  return point;
+}
+
+async function makeQuestion(outlineId: ID, pointIds: ID[], stem: string): Promise<Question> {
+  const question: Question = {
+    id: newId(),
+    outlineId,
+    knowledgePointIds: pointIds,
+    type: 'single',
+    stem,
+    options: [{ key: 'A', text: '甲' }],
+    answer: 'A',
+    explanation: '',
+    difficulty: 2,
+    source: 'ai',
+    createdAt: Date.now(),
+  };
+  await db.questions.put(question);
+  return question;
+}
+
+async function makeMistake(questionId: ID): Promise<MistakeNote> {
+  const note: MistakeNote = {
+    id: newId(),
+    questionId,
+    wrongCount: 1,
+    lastWrongAt: Date.now(),
+    resolved: false,
+    streak: 0,
+  };
+  await db.mistakes.put(note);
+  return note;
+}
+
+async function makeMastery(pointId: ID): Promise<void> {
+  await db.mastery.put(createMastery(pointId, Date.now()));
+}
+
+beforeEach(clearAll);
+
+/* ============================== 删除大纲 ============================== */
+
+describe('删除大纲', () => {
+  it('连同知识点、掌握度、题目、错题记录一起清掉', async () => {
+    const outline = await makeOutline('要被删掉的大纲');
+    const point = await makePoint(outline.id, '欧姆定律');
+    const question = await makeQuestion(outline.id, [point.id], '题干');
+    const note = await makeMistake(question.id);
+    await makeMastery(point.id);
+
+    await deleteOutline(outline.id);
+
+    expect(await db.outlines.get(outline.id)).toBeUndefined();
+    expect(await db.knowledgePoints.where('outlineId').equals(outline.id).count()).toBe(0);
+    expect(await db.mastery.get(point.id)).toBeUndefined();
+    expect(await db.questions.get(question.id)).toBeUndefined();
+    expect(await db.mistakes.get(note.id)).toBeUndefined();
+  });
+
+  it('不会误伤别的大纲', async () => {
+    const doomed = await makeOutline('要被删掉的');
+    const keeper = await makeOutline('要留下的', 'plc');
+
+    const doomedPoint = await makePoint(doomed.id, '旧知识点');
+    const keeperPoint = await makePoint(keeper.id, '梯形图');
+    const doomedQuestion = await makeQuestion(doomed.id, [doomedPoint.id], '旧题');
+    const keeperQuestion = await makeQuestion(keeper.id, [keeperPoint.id], '要留的题');
+    await makeMistake(doomedQuestion.id);
+    const keeperNote = await makeMistake(keeperQuestion.id);
+    await makeMastery(doomedPoint.id);
+    await makeMastery(keeperPoint.id);
+
+    await deleteOutline(doomed.id);
+
+    expect(await db.outlines.count()).toBe(1);
+    expect(await db.outlines.get(keeper.id)).toBeTruthy();
+    expect(await db.knowledgePoints.get(keeperPoint.id)).toBeTruthy();
+    expect(await db.questions.get(keeperQuestion.id)).toBeTruthy();
+    expect(await db.mastery.get(keeperPoint.id)).toBeTruthy();
+    expect(await db.mistakes.get(keeperNote.id)).toBeTruthy();
+  });
+
+  it('删一份没有题的大纲也不会出错', async () => {
+    const outline = await makeOutline('空大纲');
+    await makePoint(outline.id, '孤立知识点');
+
+    await expect(deleteOutline(outline.id)).resolves.toBeUndefined();
+    expect(await db.outlines.count()).toBe(0);
+    expect(await db.knowledgePoints.count()).toBe(0);
+  });
+
+  it('删不存在的大纲不会抛错', async () => {
+    await expect(deleteOutline('根本没有这个 id')).resolves.toBeUndefined();
+  });
+});
+
+/* ============================== 删除知识点 ============================== */
+
+describe('删除知识点', () => {
+  it('连同子节点一起删，掌握度也清掉', async () => {
+    const outline = await makeOutline('大纲');
+    const parent = await makePoint(outline.id, '欧姆定律', { order: 0 });
+    const child = await makePoint(outline.id, '串联计算', { parentId: parent.id, order: 1, depth: 2 });
+    const grandChild = await makePoint(outline.id, '分压', { parentId: child.id, order: 2, depth: 3 });
+    const other = await makePoint(outline.id, '并联计算', { order: 3 });
+
+    await makeMastery(parent.id);
+    await makeMastery(child.id);
+    await makeMastery(grandChild.id);
+    await makeMastery(other.id);
+
+    await removeKnowledgePoint(parent.id);
+
+    for (const p of [parent, child, grandChild]) {
+      expect(await db.knowledgePoints.get(p.id), `${p.name} 应该被删掉`).toBeUndefined();
+      expect(await db.mastery.get(p.id)).toBeUndefined();
+    }
+    // 无关的兄弟节点要留下
+    expect(await db.knowledgePoints.get(other.id)).toBeTruthy();
+    expect(await db.mastery.get(other.id)).toBeTruthy();
+  });
+
+  it('题目保留，但会摘掉指向被删知识点的引用', async () => {
+    const outline = await makeOutline('大纲');
+    const doomed = await makePoint(outline.id, '要被删的点');
+    const keeper = await makePoint(outline.id, '要留下的点', { order: 1 });
+
+    // 一道只挂被删点，一道两个点都挂
+    const onlyDoomed = await makeQuestion(outline.id, [doomed.id], '只挂被删点');
+    const both = await makeQuestion(outline.id, [doomed.id, keeper.id], '两个点都挂');
+
+    await removeKnowledgePoint(doomed.id);
+
+    const a = await db.questions.get(onlyDoomed.id);
+    const b = await db.questions.get(both.id);
+    // 题本身不能丢——用户可能只是重整大纲，题是花了 token 生成的
+    expect(a).toBeTruthy();
+    expect(b).toBeTruthy();
+    expect(a?.knowledgePointIds).toEqual([]);
+    expect(b?.knowledgePointIds).toEqual([keeper.id]);
+    // 不能再留下指向不存在节点的悬空 id
+    expect(await db.knowledgePoints.get(doomed.id)).toBeUndefined();
+  });
+
+  it('不会动别的大纲里的知识点和题目', async () => {
+    const outline = await makeOutline('甲');
+    const other = await makeOutline('乙', 'plc');
+    const point = await makePoint(outline.id, '甲的点');
+    const otherPoint = await makePoint(other.id, '乙的点');
+    const otherQuestion = await makeQuestion(other.id, [otherPoint.id], '乙的题');
+
+    await removeKnowledgePoint(point.id);
+
+    expect(await db.knowledgePoints.get(otherPoint.id)).toBeTruthy();
+    expect((await db.questions.get(otherQuestion.id))?.knowledgePointIds).toEqual([otherPoint.id]);
+  });
+
+  it('删不存在的知识点不会抛错', async () => {
+    await expect(removeKnowledgePoint('根本没有这个 id')).resolves.toBeUndefined();
+  });
+});
