@@ -357,9 +357,9 @@ npm run build:preview    # 产出 dist-preview/preview-*.html（8 个页面，�
 - [x] **M4** 错题本、掌握度、遗忘曲线排程
 - [x] **M5** 自适应出题、学习者画像迭代、补强微讲义
 - [x] **M6** Capacitor 安卓工程 + 一键打包脚本 + GitHub Actions 自动出包
-- [ ] **M7** 推送到 GitHub、发布首个 Release（代码、脚本、CI 都就绪，**只差一个 Token**）
-      → 手把手建仓（3 分钟）见 [`docs/01-方案确认书-v1.md`](docs/01-方案确认书-v1.md) 第 7 节；
-        命令行方式见 [`docs/03-开发与部署步骤.md`](docs/03-开发与部署步骤.md) 第六节
+- [x] **M7** 推送到 GitHub、发布首个 Release —— ✅ 已发布：
+      <https://github.com/mengxiangbaofu888/electro-tutor/releases>（打 `v*` 标签自动构建 APK 并挂到 Release）
+      → 发布新版本的流程见 [`docs/03-开发与部署步骤.md`](docs/03-开发与部署步骤.md) 第六节
 - [x] **M8** 题库导入导出（Excel 直读 / CSV / TSV，含往返一致性测试）
 - [ ] **M9** 更多平台字幕适配（抖音 / MOOC）、考前冲刺模式、题库导出成 Excel 原生格式
 
