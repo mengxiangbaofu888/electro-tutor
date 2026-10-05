@@ -278,10 +278,11 @@ npm run test:watch  # 监听模式
 | `src/features/outline/OutlineListPage.test.tsx` | **大纲页交互**：一键装上四条线真的装进 4 套大纲 + 90 多个知识点，重复点击不会翻倍 |
 | `src/lib/platform/image.test.ts` | **图片压缩**：等比缩放长边严格不超上限、极端比例与四舍五入都不越界、本来小的不二次压缩、解码失败要退回原图而**不能挂死** |
 | `src/lib/platform/save-file.test.ts` | **导出文件**：网页版走浏览器下载、App 版走系统保存面板、用户取消不算失败、真正的失败不能吞掉 |
+| `src/features/practice/PracticePage.test.tsx` | **练习页交互**：打开页面就自动把题量算好、主按钮直接可点（不是一屏灰按钮）；自动分配会按知识点铺开而不是只填一个；手动改过的题量不会被自动计算覆盖 |
 | `src/features/pages.render.test.tsx` | **每个页面都能渲染**：用服务端首屏渲染确认 10 个页面在无数据时不会白屏（模块导入即崩、hook 用错、空数据越界） |
 | `src/docs-consistency.test.ts` | **文档不会腐烂**：README/docs 里提到的 npm 脚本、相对链接、源码路径都真实存在；知识点数量与内置数据一致；测试文件表与磁盘上的文件一一对应 |
 
-当前状态：**216 个用例全部通过**（16 个测试文件）。
+当前状态：**220 个用例全部通过**（17 个测试文件）。
 
 ### 想看界面长什么样
 

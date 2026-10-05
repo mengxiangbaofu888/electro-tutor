@@ -94,6 +94,22 @@ export function PracticePage() {
     () => Object.values(allocation).reduce((s, n) => s + (n || 0), 0),
     [allocation],
   );
+
+  // 一进页面就把题量算出来。
+  // 「自适应出题」默认是勾上的，但题量并不会自己冒出来——没有这段的话，
+  // 打开页面看到的是：所有知识点都是 0、"共 0 道"、两个主按钮全是灰的。
+  // 用户会以为这页坏了，而"先点一下自适应推荐 20 道"这个前提没写在任何地方。
+  useEffect(() => {
+    if (!adaptive || !outlineId || !points.length) return;
+    if (totalQuestions > 0) return; // 已经有题量就别覆盖用户的选择
+    void (async () => {
+      try {
+        await refreshAdaptive(20);
+      } catch {
+        // 算不出来就保持 0，用户可以手动填，不影响页面能用
+      }
+    })();
+  }, [adaptive, outlineId, points, totalQuestions, refreshAdaptive]);
   const typeTotal = useMemo(() => Object.values(typeMix).reduce((s, n) => s + (n || 0), 0), [typeMix]);
 
   async function doGenerate(thenStart: boolean) {
@@ -259,6 +275,7 @@ export function PracticePage() {
                       type="number"
                       min={0}
                       max={30}
+                      aria-label={`知识点「${p.name}」的题量`}
                       value={allocation[p.id] ?? 0}
                       onChange={(e) =>
                         setAllocation((prev) => ({ ...prev, [p.id]: Math.max(0, Number(e.target.value) || 0) }))
@@ -292,6 +309,7 @@ export function PracticePage() {
                     type="number"
                     min={0}
                     max={50}
+                    aria-label={`题型「${QUESTION_TYPE_LABELS[t]}」的数量`}
                     value={typeMix[t]}
                     onChange={(e) =>
                       setTypeMix((prev) => ({ ...prev, [t]: Math.max(0, Number(e.target.value) || 0) }))
