@@ -8,7 +8,8 @@ import { db, getDefaultLLM, newId } from '../../lib/db/db';
 import type { Material, TrackId } from '../../lib/db/types';
 import { TRACK_HINTS, TRACK_LABELS } from '../../lib/db/types';
 import { extractBilibiliSubtitle, extractFromFile, extractFromUrl } from '../../lib/extract';
-import { fileToDataUrl, visionExtract } from '../../lib/llm/client';
+import { visionExtract } from '../../lib/llm/client';
+import { compressImages, formatBytes } from '../../lib/platform/image';
 import { Alert, Badge, Button, Card, Empty, Field, Loading, Select, TextArea, TextInput } from '../../components/ui';
 
 const TRACK_OPTIONS = (Object.keys(TRACK_LABELS) as TrackId[]).map((t) => ({
@@ -191,9 +192,13 @@ export function IngestPage() {
     setMessage(null);
     try {
       const list = Array.from(files).slice(0, 6);
-      setProgress(`正在识别 ${list.length} 张图片…`);
-      const dataUrls: string[] = [];
-      for (const f of list) dataUrls.push(await fileToDataUrl(f));
+      // 手机照片动辄几 MB，原图直发会让请求体到几十 MB（基本必然失败，还按体积计费）。
+      // 先压到长边 1280 再送出去。
+      setProgress(`正在压缩 ${list.length} 张图片…`);
+      const { dataUrls, originalBytes, compressedBytes } = await compressImages(list);
+      setProgress(
+        `图片 ${formatBytes(originalBytes)} → ${formatBytes(compressedBytes)}，正在识别…`,
+      );
 
       const out = await visionExtract(
         vision,
@@ -343,7 +348,9 @@ export function IngestPage() {
         {mode === 'image' && (
           <>
             <Alert>
-              拍照或从相册选课件、电路图、公式截图，交给识图模型转成文字。识别结果请自己核对一遍。
+              拍照或从相册选课件、电路图、公式截图，交给识图模型转成文字。
+              图片会<b>自动压缩</b>后再发送（长边缩到 1280），省流量也省钱。
+              识别结果请自己核对一遍——复杂电路图仍可能有误差。
             </Alert>
             <label className="btn primary block">
               选择图片（最多 6 张）
