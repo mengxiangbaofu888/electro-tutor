@@ -113,6 +113,18 @@ export function parseJsonLoose<T>(raw: string, what = '模型返回'): T {
       lastErr = e;
     }
   }
+  // **空输出单独说清楚**。用户看到的原文是
+  // "解析失败：模型没有返回合法 JSON。原始输出片段：（no braces）"——
+  // 完全看不懂，而这多半不是"JSON 写坏了"，而是**模型一个字都没返回**：
+  // 推理型模型（DeepSeek 的 deepseek-flash 默认开思考模式）额度被思维链吃光时就是这样。
+  if (!raw.trim()) {
+    throw new Error(
+      `${what}：模型返回了空内容（一个字都没有）。` +
+        '最常见的原因是**推理型模型把输出额度花在了"思考"上**——' +
+        'App 已对出题/大纲这类任务自动关闭思考模式；若仍为空，请到「我的 → 模型配置」' +
+        '点「测试连接」看是否也是空回复，必要时换一个模型。',
+    );
+  }
   const preview = raw.slice(0, 400).replace(/\s+/g, ' ');
   throw new Error(
     `${what}解析失败：模型没有返回合法 JSON。原始输出片段：${preview}${raw.length > 400 ? '…' : ''}` +

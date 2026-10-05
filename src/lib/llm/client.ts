@@ -44,6 +44,16 @@ export interface ChatOptions {
    * 只要还在持续吐字就不该被打断；真正该掐掉的是"长时间一点动静都没有"。
    */
   idleTimeoutMs?: number;
+  /**
+   * 思考模式：
+   *   · `'off'` —— 对认识的服务商（DeepSeek / 通义 / 智谱）直接关掉思考模式。
+   *     **结构化任务（出题、大纲、判分、连通性测试）都应该用它**：
+   *     更快、更便宜，而且不会出现"额度被思考吃光、content 是空的"。
+   *   · 不传 = 用服务商默认（DeepSeek 默认是开）。
+   */
+  thinking?: 'off' | 'default';
+  /** 不关思考时把强度压到多少（默认 low：学习 App 里速度比"想得更深"重要） */
+  reasoningEffort?: 'low' | 'high' | 'max';
 }
 
 /** 默认空闲超时：45 秒没有任何数据就判定为卡住 */
@@ -55,6 +65,8 @@ export interface ChatResult {
   content: string;
   /** 粗略 token 统计，服务商返回时才有 */
   usage?: { prompt?: number; completion?: number };
+  /** 推理型模型的思维链（content 为空时用来判断"它到底想没想"） */
+  reasoning?: string;
 }
 
 /* ------------------------------ 原生 HTTP 通路 ------------------------------ */
@@ -120,8 +132,17 @@ function describeHttpError(status: number, bodyText: string): string {
 }
 
 function describeNetworkError(e: unknown, config: LLMConfig): string {
-  const msg = e instanceof Error ? e.message : String(e);
+  const raw = e instanceof Error ? e.message : String(e);
+  // undici/浏览器会把底层原因包在 cause 里（如 TypeError: fetch failed ← socket hang up），
+  // 只看最外层会漏掉真正的原因
+  const cause = (e as { cause?: { message?: string; code?: string } })?.cause;
+  const msg = `${raw} ${cause?.message ?? ''} ${cause?.code ?? ''}`.trim();
   if (e instanceof DOMException && e.name === 'AbortError') return '请求已取消。';
+  // **偶发中断要排在前面**：undici 把它包成 "fetch failed"，
+  // 先判"跨域/网络被拦"就会给出完全误导的提示（用户看到的英文原文也解释了）
+  if (/connection abort|ECONNRESET|socket hang up|EPIPE|network is unreachable|UND_ERR_SOCKET/i.test(msg)) {
+    return `连接被中断了（${raw}）。多半是网络切换或服务商瞬断，稍等一下再试通常就好；如果一直这样，换个网络或换个模型。`;
+  }
   // 浏览器抛的是 TypeError("Failed to fetch" / "Load failed")，
   // Node/undici 抛的是 TypeError("fetch failed")，底层原因可能是 DNS、拒连或跨域。
   if (
@@ -135,22 +156,108 @@ function describeNetworkError(e: unknown, config: LLMConfig): string {
       `当前接口：${config.baseUrl}`
     );
   }
-  return `请求出错：${msg}`;
+  // 手机网络的"连接被中断"：用户看到的原文是
+  // "Software caused connection abort"（Windows/安卓底层 WSAECONNABORTED），
+  // 完全看不懂，而且它多半是**偶发**的（切网、服务商断流），所以自动重试一次。
+  return `请求出错：${raw}`;
+}
+
+/** 是不是"偶发连接中断"这类值得自动重试的错误 */
+export function isTransientNetworkError(e: unknown): boolean {
+  const raw = e instanceof Error ? e.message : String(e);
+  const cause = (e as { cause?: { message?: string; code?: string } })?.cause;
+  const msg = `${raw} ${cause?.message ?? ''} ${cause?.code ?? ''}`;
+  return /connection abort|ECONNRESET|socket hang up|EPIPE|network is unreachable|UND_ERR_SOCKET|fetch failed|Load failed/i.test(
+    msg,
+  );
 }
 
 /* ------------------------------ 主体 ------------------------------ */
+
+/**
+ * 各家"思考模式"的关闭参数。
+ *
+ * 为什么必须处理这个：DeepSeek 的 `deepseek-flash`（V4.1-Flash）**默认开着思考模式**，
+ * 模型会先把额度花在思维链上（`reasoning_content`），最后才写 `content`。
+ * 我们要的是**结构化 JSON**（出题、大纲、判分），思考模式：
+ *   · 更慢、更贵；
+ *   · 额度被思考吃光时 `content` 直接是空的 —— 用户看到的就是
+ *     "连接成功，模型回复：(模型返回为空)" 和 "模型没有返回合法 JSON（no braces）"。
+ *
+ * 所以对认识的服务商，直接把思考关掉；不认识的**绝不乱发字段**
+ * （很多网关遇到不认识的字段会直接 400）。
+ */
+export function thinkingOffParam(config: LLMConfig): Record<string, unknown> | null {
+  const host = hostOf(config.baseUrl).toLowerCase();
+  const model = config.model.trim().toLowerCase();
+
+  // 按**域名或模型名**判断厂商：很多人用中转/代理地址调同一家的模型，
+  // 只看域名会漏掉；只看模型名又可能被自定义名字骗到，两个都认更稳。
+  const isDeepSeek = host.includes('deepseek.com') || /^deepseek/.test(model);
+  const isQwen = host.includes('dashscope') || host.includes('aliyuncs') || /^qwen/.test(model);
+  const isZhipu = host.includes('bigmodel') || host.includes('zhipu') || /^glm/.test(model);
+
+  if (isDeepSeek) {
+    // 官方文档：{"thinking": {"type": "enabled/disabled"}}。
+    // 推理专用模型（*-reasoner）本来就是靠思考工作的，不去动它。
+    return /reasoner/.test(model) ? null : { thinking: { type: 'disabled' } };
+  }
+  if (isQwen) return { enable_thinking: false };
+  if (isZhipu) return { thinking: { type: 'disabled' } };
+  // 不认识的服务商**绝不乱发字段**：很多网关遇到不认识的字段会直接 400
+  return null;
+}
 
 function buildBody(config: LLMConfig, messages: ChatMessage[], opts: ChatOptions, stream: boolean) {
   const body: Record<string, unknown> = {
     model: config.model.trim(),
     messages,
-    temperature: opts.temperature ?? config.temperature ?? 0.6,
     stream,
   };
+
+  // 思考模式的开关与强度
+  const thinkingOff = opts.thinking === 'off';
+  if (thinkingOff) {
+    Object.assign(body, thinkingOffParam(config) ?? {});
+  } else {
+    // 不关思考时把强度压到 low：这是个学习 App，速度比"想得更深"重要
+    body.reasoning_effort = opts.reasoningEffort ?? 'low';
+  }
+
+  // 官方明确：思考模式下 temperature 不生效（发了也不报错，但会被忽略）。
+  // 关掉思考时它才有效，所以只在"确实关掉了思考"或"压根没发思考参数"时发，
+  // 避免给出"以为在调参"的假象。
+  const thinkingDisabled = thinkingOff && thinkingOffParam(config) !== null;
+  if (!thinkingDisabled) body.temperature = opts.temperature ?? config.temperature ?? 0.6;
+
   if (opts.maxTokens) body.max_tokens = opts.maxTokens;
   // 不是所有服务商都支持 response_format，失败时由调用方降级重试
   if (opts.jsonMode && !stream) body.response_format = { type: 'json_object' };
   return body;
+}
+
+/**
+ * 空回复不是成功。
+ *
+ * 踩过的坑：DeepSeek 的 deepseek-flash 默认开思考模式，我们只给了 16 个 token，
+ * 思考把额度用光 → HTTP 200 但 `content` 是空字符串 →
+ * 旧代码照样报"连接成功，模型回复：(模型返回为空)"，用户一头雾水，
+ * 真去出题时全是"模型没有返回合法 JSON"。
+ *
+ * 现在：空内容一律当失败，并且把可能的原因和下一步说清楚。
+ */
+function emptyReplyError(config: LLMConfig, reasoning: string, opts: ChatOptions): Error {
+  const where = `${config.model || '(未填模型)'} @ ${hostOf(config.baseUrl)}`;
+  const sawReasoning = reasoning.trim().length > 0;
+  return new Error(
+    (sawReasoning
+      ? `模型只输出了思考内容、没有给出最终答案（${where}）。`
+      : `模型返回了空内容（HTTP 200 但一个字都没有，${where}）。`) +
+      '常见原因：① 这是推理型模型且 max_tokens 太小，额度被"思考"用光了；' +
+      '② 模型名不对或该模型不支持这种请求方式；③ 服务商侧异常。' +
+      (opts.jsonMode ? '（本次要的是 JSON，App 应当已自动关闭思考模式，若仍为空请换个模型。）' : '') +
+      ' 建议：到「我的 → 模型配置」点「测试连接」看是否也是空回复。',
+  );
 }
 
 async function readErrorBody(res: Response): Promise<string> {
@@ -172,7 +279,12 @@ export async function chat(
 ): Promise<ChatResult> {
   if (!config.baseUrl.trim()) throw new Error('还没有配置接口地址，请先到「我的 → 模型配置」里填写。');
   if (!config.model.trim()) throw new Error('还没有填写模型 ID，请先到「我的 → 模型配置」里填写。');
-  if (!config.apiKey.trim()) throw new Error('还没有填写 API Key，请先到「我的 → 模型配置」里填写。');
+  if (!config.apiKey.trim()) throw new Error('还没有配置 API Key，请先到「我的 → 模型配置」里填写。');
+
+  // 要 JSON 的任务（出题、大纲、判分、识图取结构化结果）一律关掉思考模式：
+  // 更快、更省钱，而且**不会出现"思考把 max_tokens 用光、content 是空的"**——
+  // 这正是用户遇到的"测试连接正常、真出题全是空/无法解析 JSON"的根因。
+  if (opts.jsonMode && !opts.thinking) opts = { ...opts, thinking: 'off' };
 
   const url = resolveUrl(chatCompletionsUrl(config.baseUrl), config.proxyPrefix);
   const streaming = Boolean(opts.onDelta);
@@ -214,6 +326,7 @@ export async function chat(
       throw new Error(describeHttpError(res.status, JSON.stringify(res.data ?? '')));
     }
     const text = extractContent(res.data);
+    if (!text.trim()) throw emptyReplyError(config, extractReasoning(res.data), opts);
     if (opts.onDelta && text) opts.onDelta(text);
     return { content: text };
   }
@@ -247,26 +360,39 @@ export async function chat(
     return new Error(describeNetworkError(e, config));
   };
 
+  /**
+   * 带一次自动重试的发送。
+   * 手机网络里"Software caused connection abort / ECONNRESET"这类**偶发**中断很常见，
+   * 用户看到的却是一句看不懂的英文；直接失败会让他以为程序坏了。超时和主动取消不重试。
+   */
+  const doFetch = async (bodyObj: unknown): Promise<Response> => {
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        touch();
+        return await fetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(bodyObj),
+          signal: ctrl.signal,
+        });
+      } catch (e) {
+        lastErr = e;
+        if (timedOut || opts.signal?.aborted || !isTransientNetworkError(e)) throw e;
+      }
+    }
+    throw lastErr;
+  };
+
   let res: Response;
   try {
-    res = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload),
-      signal: ctrl.signal,
-    });
+    res = await doFetch(payload);
   } catch (e) {
     // jsonMode 不被支持时，服务端可能直接拒绝，这里兜底重试一次不带 response_format
     if (opts.jsonMode && !streaming && !timedOut) {
       const retryPayload = buildBody(config, messages, { ...opts, jsonMode: false }, false);
       try {
-        touch();
-        res = await fetch(url, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(retryPayload),
-          signal: ctrl.signal,
-        });
+        res = await doFetch(retryPayload);
       } catch (e2) {
         clear();
         opts.signal?.removeEventListener('abort', onOuterAbort);
@@ -283,17 +409,13 @@ export async function chat(
     let bodyText = await readErrorBody(res);
     // 有些服务商不支持 response_format，去掉后重试一次
     if (opts.jsonMode && (res.status === 400 || res.status === 422)) {
-      touch();
-      const retry = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(buildBody(config, messages, { ...opts, jsonMode: false }, false)),
-        signal: ctrl.signal,
-      });
+      const retry = await doFetch(buildBody(config, messages, { ...opts, jsonMode: false }, false));
       if (retry.ok) {
         clear();
         opts.signal?.removeEventListener('abort', onOuterAbort);
-        return finalize(await retry.json(), opts);
+        const out = finalize(await retry.json(), opts);
+        if (!out.content.trim()) throw emptyReplyError(config, out.reasoning ?? '', opts);
+        return out;
       }
       bodyText = await readErrorBody(retry);
     }
@@ -302,18 +424,27 @@ export async function chat(
     throw new Error(describeHttpError(res.status, bodyText));
   }
 
+  let result: ChatResult;
   try {
     if (streaming && res.body) {
-      return await streamResponse(res, opts, touch);
+      result = await streamResponse(res, opts, touch);
+    } else {
+      const json = (await res.json()) as unknown;
+      result = finalize(json, opts);
     }
-    const json = (await res.json()) as unknown;
-    return finalize(json, opts);
   } catch (e) {
     throw netError(e);
   } finally {
     clear();
     opts.signal?.removeEventListener('abort', onOuterAbort);
   }
+
+  // HTTP 200 但没有正文**不是成功**。空回复曾经被当成"连接成功"报给用户，
+  // 结果他真去出题时全是"模型没有返回合法 JSON"——必须在这里拦住。
+  if (!result.content.trim()) {
+    throw emptyReplyError(config, result.reasoning ?? '', opts);
+  }
+  return result;
 }
 
 /** 从接口地址里取出主机名，用于错误提示（让用户知道打到了哪里） */
@@ -329,8 +460,16 @@ function hostOf(baseUrl: string): string {
 function finalize(json: unknown, opts: ChatOptions): ChatResult {
   const content = extractContent(json);
   const usage = extractUsage(json);
+  const reasoning = extractReasoning(json);
   if (opts.onDelta && content) opts.onDelta(content);
-  return { content, usage };
+  return reasoning ? { content, usage, reasoning } : { content, usage };
+}
+
+/** 取思维链内容（DeepSeek 等把 CoT 放在与 content 同级的 reasoning_content） */
+export function extractReasoning(json: unknown): string {
+  const first = (json as { choices?: { message?: { reasoning_content?: unknown } }[] })?.choices?.[0];
+  const raw = first?.message?.reasoning_content;
+  return typeof raw === 'string' ? raw : '';
 }
 
 function extractContent(json: unknown): string {
@@ -368,6 +507,8 @@ async function streamResponse(
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
   let full = '';
+  /** 思维链（推理型模型会先吐这个）；最终 content 为空时它是唯一线索 */
+  let reasoning = '';
   let rawAll = '';
   let sawSse = false;
 
@@ -388,11 +529,14 @@ async function streamResponse(
       if (!data || data === '[DONE]') continue;
       sawSse = true;
       try {
-        const parsed = JSON.parse(data) as { choices?: { delta?: { content?: string } }[] };
-        const delta = parsed.choices?.[0]?.delta?.content;
-        if (delta) {
-          full += delta;
-          opts.onDelta?.(delta);
+        const parsed = JSON.parse(data) as {
+          choices?: { delta?: { content?: string; reasoning_content?: string } }[];
+        };
+        const delta = parsed.choices?.[0]?.delta;
+        if (delta?.reasoning_content) reasoning += delta.reasoning_content;
+        if (delta?.content) {
+          full += delta.content;
+          opts.onDelta?.(delta.content);
         }
       } catch {
         // 单行解析失败不影响整体
@@ -403,20 +547,24 @@ async function streamResponse(
   // 有些网关（自建代理、部分中转）会无视 stream: true 直接返回一段完整 JSON。
   // 这时按 SSE 解析会得到空字符串——用户看到"没有输出"，却不知道为什么。
   // 所以一个 data: 都没收到时，退回普通解析。
-  if (!sawSse) {
-    const text = rawAll.trim();
-    if (text) {
-      try {
-        return finalize(JSON.parse(text), opts);
-      } catch {
-        // 连 JSON 都不是：把原文当内容返回，也总比返回空好
-        opts.onDelta?.(text);
-        return { content: text };
-      }
+  //
+  // 但**只收到 [DONE] 这类标记不算"有内容"**：曾经因此把 "data: [DONE]"
+  // 当成模型输出返回给上层（日志里就是一句莫名其妙的 data: [DONE]）。
+  const stripped = rawAll
+    .replace(/^\s*data:\s*/gim, '')
+    .replace(/\[DONE\]/gi, '')
+    .trim();
+  if (!sawSse && stripped) {
+    try {
+      return finalize(JSON.parse(stripped), opts);
+    } catch {
+      // 连 JSON 都不是：把原文当内容返回，也总比返回空好
+      opts.onDelta?.(stripped);
+      return { content: stripped };
     }
   }
 
-  return { content: full };
+  return reasoning ? { content: full, reasoning } : { content: full };
 }
 
 /* ------------------------------ 视觉（识图） ------------------------------ */
@@ -487,7 +635,9 @@ export async function testVisionConnection(config: LLMConfig): Promise<string> {
     config,
     [VISION_PROBE_IMAGE],
     '这是一张很小的测试图。请只回答两点：1) 底色是什么颜色？2) 中间是什么形状？不要解释。',
-    { temperature: 0, maxTokens: 60, idleTimeoutMs: VISION_IDLE_TIMEOUT_MS },
+    // 关掉思考 + 给足额度：推理型模型（如 deepseek-flash 默认开思考）会把额度花在
+    // 思维链上，content 就空了，测试会误判成"模型不行"，其实是预算没给够。
+    { temperature: 0, maxTokens: 512, thinking: 'off', idleTimeoutMs: VISION_IDLE_TIMEOUT_MS },
   );
   return reply.trim() || '(模型返回为空)';
 }
@@ -537,7 +687,13 @@ function pickModelIds(json: unknown): string[] {
 export async function testConnection(config: LLMConfig): Promise<string> {
   const res = await chat(config, [{ role: 'user', content: '回复两个字：正常' }], {
     temperature: 0,
-    maxTokens: 16,
+    // 这里曾经只给 16 个 token：推理型模型（DeepSeek 的 deepseek-flash 默认开思考模式）
+    // 思考就把额度用光，content 是空的，界面却报
+    // "连接成功，模型回复：(模型返回为空)" —— 用户据此以为配置没问题，
+    // 真去出题时却全是"模型没有返回合法 JSON"。
+    // 现在：关掉思考 + 给足额度，"测试通不通"才真的可信。
+    maxTokens: 512,
+    thinking: 'off',
     idleTimeoutMs: 20_000,
   });
   return res.content.trim() || '(模型返回为空)';

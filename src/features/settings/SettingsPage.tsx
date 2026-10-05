@@ -526,10 +526,12 @@ export function SettingsPage() {
             </div>
 
             {editing.kind === 'vision' &&
-              /deepseek\.com/i.test(editing.baseUrl) && (
+              /deepseek\.com/i.test(editing.baseUrl) &&
+              /pro/i.test(editing.model) && (
                 <Alert tone="warn">
-                  DeepSeek **没有视觉模型**，用它识图不会成功（要么报错、要么一直没响应）。
-                  识图请换一家：智谱 GLM 的 <b>glm-4v-flash</b> 有免费档，最合适。
+                  按 DeepSeek 官方文档，<b>deepseek-v4-pro 不支持图像理解</b>，拿它识图会失败。
+                  识图请改用 <b>deepseek-flash</b>（V4.1-Flash，支持看图），
+                  或智谱的 <b>glm-4v-flash</b>。
                 </Alert>
               )}
 

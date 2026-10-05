@@ -11,7 +11,15 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { LLMConfig } from '../db/types';
-import { chat, listModels, looksLikeItSawTheImage, resolveUrl, testVisionConnection, truncateText } from './client';
+import {
+  chat,
+  listModels,
+  looksLikeItSawTheImage,
+  resolveUrl,
+  testConnection,
+  testVisionConnection,
+  truncateText,
+} from './client';
 import { chatCompletionsUrl, isPrivateEndpoint, modelsUrl } from './presets';
 
 /* ------------------------------ 替身服务 ------------------------------ */
@@ -204,6 +212,133 @@ describe('验证"这个模型到底能不能看图"', () => {
       res.end(JSON.stringify({ error: { message: 'model does not support image input' } }));
     };
     await expect(testVisionConnection(cfg({ kind: 'vision' }))).rejects.toThrow(/不支持|image/i);
+  });
+});
+
+/* ============================== 思考模式与空回复 ============================== */
+
+describe('推理型模型的思考模式（deepseek-flash 默认开思考，这是"一用就全是问题"的根因）', () => {
+  const deepseek = () => cfg({ model: 'deepseek-flash' });
+
+  it('要 JSON 的任务自动关掉思考模式', async () => {
+    handler = respondOk;
+    await chat(deepseek(), userMsg, { jsonMode: true });
+    const body = JSON.parse(received[0].body) as Record<string, unknown>;
+    expect(body.thinking).toEqual({ type: 'disabled' });
+  });
+
+  it('关掉思考后不再发 temperature（官方说思考模式下它不生效，发了会误导）', async () => {
+    handler = respondOk;
+    await chat(deepseek(), userMsg, { jsonMode: true });
+    const body = JSON.parse(received[0].body) as Record<string, unknown>;
+    expect(body.temperature).toBeUndefined();
+  });
+
+  it('不关思考时，把思考强度压到 low（学习 App 里速度更重要）', async () => {
+    handler = respondOk;
+    await chat(deepseek(), userMsg, { jsonMode: false, thinking: 'default' });
+    const body = JSON.parse(received[0].body) as Record<string, unknown>;
+    expect(body.reasoning_effort).toBe('low');
+    expect(body.thinking).toBeUndefined();
+  });
+
+  it('推理专用模型（*-reasoner）不去动它的思考设置', async () => {
+    handler = respondOk;
+    await chat(cfg({ model: 'deepseek-reasoner' }), userMsg, { jsonMode: true });
+    const body = JSON.parse(received[0].body) as Record<string, unknown>;
+    expect(body.thinking).toBeUndefined();
+  });
+
+  it('不认识的服务商绝不乱发思考字段（很多网关会因此 400）', async () => {
+    handler = respondOk;
+    await chat(cfg({ model: 'some-local-model' }), userMsg, { jsonMode: true });
+    const body = JSON.parse(received[0].body) as Record<string, unknown>;
+    expect(body.thinking).toBeUndefined();
+    expect(body.enable_thinking).toBeUndefined();
+    expect(body.temperature).toBeDefined();
+  });
+
+  it('通义/智谱的模型名也能认出对应参数', async () => {
+    handler = respondOk;
+    await chat(cfg({ model: 'qwen-plus' }), userMsg, { jsonMode: true });
+    expect(JSON.parse(received[0].body).enable_thinking).toBe(false);
+    await chat(cfg({ model: 'glm-4.5' }), userMsg, { jsonMode: true });
+    expect(JSON.parse(received[1].body).thinking).toEqual({ type: 'disabled' });
+  });
+});
+
+describe('空回复不算成功（用户看到的"连接成功，模型回复：(模型返回为空)"）', () => {
+  const emptyReply: Handler = (_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ choices: [{ message: { content: '' } }] }));
+  };
+
+  it('HTTP 200 但没有正文：必须报错，不能当成功', async () => {
+    handler = emptyReply;
+    await expect(chat(cfg(), userMsg)).rejects.toThrow(/空内容|空回复/);
+  });
+
+  it('错误信息要说清"额度可能被思考吃光了"和下一步怎么办', async () => {
+    handler = emptyReply;
+    const err = await chat(cfg(), userMsg).catch((e: Error) => e);
+    expect((err as Error).message).toContain('思考');
+    expect((err as Error).message).toContain('测试连接');
+    // 还得告诉用户是哪个模型、打到哪家，不然没法排查
+    expect((err as Error).message).toContain('test-model');
+  });
+
+  it('只回了思考内容（reasoning_content）也要说清是"没给最终答案"', async () => {
+    handler = (_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          choices: [{ message: { content: '', reasoning_content: '让我想想……' } }],
+        }),
+      );
+    };
+    const err = await chat(cfg(), userMsg).catch((e: Error) => e);
+    expect((err as Error).message).toContain('只输出了思考内容');
+  });
+
+  it('testConnection 遇到空回复必须失败（这正是误导用户的那一步）', async () => {
+    handler = emptyReply;
+    await expect(testConnection(cfg())).rejects.toThrow(/空内容|空回复/);
+  });
+
+  it('流式也一样：一个 data: 都没有时算失败', async () => {
+    handler = (_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('data: [DONE]\n\n');
+      res.end();
+    };
+    await expect(chat(cfg(), userMsg, { onDelta: () => {} })).rejects.toThrow(/空内容|空回复/);
+  });
+});
+
+describe('偶发连接中断要自动重试一次', () => {
+  it('第一次被中断、第二次成功 → 用户拿到结果而不是报错', async () => {
+    let attempts = 0;
+    handler = (req, res) => {
+      attempts += 1;
+      if (attempts === 1) {
+        // 模拟"Software caused connection abort"：直接在套接字层面掐断
+        (req as unknown as { socket?: { destroy: () => void } }).socket?.destroy();
+        return;
+      }
+      respondOk(req, res, '');
+    };
+    const res = await chat(cfg(), userMsg);
+    expect(res.content).toBe('默认应答');
+    expect(attempts).toBe(2);
+  });
+
+  it('中断的提示要翻成人话（不能把英文原文甩给用户）', async () => {
+    handler = (req) => {
+      (req as unknown as { socket?: { destroy: () => void } }).socket?.destroy();
+    };
+    const err = await chat(cfg(), userMsg).catch((e: Error) => e);
+    expect((err as Error).message).toContain('连接被中断');
+    expect((err as Error).message).toContain('稍等一下再试');
   });
 });
 

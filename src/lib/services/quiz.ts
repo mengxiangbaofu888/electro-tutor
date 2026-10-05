@@ -265,8 +265,11 @@ export async function generateQuestions(
       const result = await chat(config, messages, {
         jsonMode: true,
         temperature: 0.7,
-        // 每批只要几道题，输出上限按批量缩放：给太多反而让模型话多、更慢
-        maxTokens: Math.min(8192, 800 + batchCount * 400),
+        // 注意别把预算压得太小：推理型模型（DeepSeek 的 deepseek-flash 默认开思考）
+        // 会先把额度花在思维链上，额度不够时 **content 直接是空的**——
+        // 表现就是"模型没有返回合法 JSON（no braces）"。jsonMode 会自动关思考，
+        // 但不同服务商行为不一，所以这里给一个足够的下限。
+        maxTokens: Math.max(4096, 800 + batchCount * 400),
         onDelta: (delta) => {
           raw += delta;
           onProgress?.(delta);
