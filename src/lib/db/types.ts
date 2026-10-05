@@ -92,6 +92,8 @@ export interface Outline {
   title: string;
   track: TrackId;
   materialIds: ID[];
+  /** 是否是 App 内置的起步大纲（不是由 AI 生成的） */
+  seed?: boolean;
   createdAt: number;
   updatedAt: number;
 }

@@ -8,6 +8,7 @@ import { db, getDefaultLLM, getProfile } from '../../lib/db/db';
 import type { Attempt, LearnerProfile } from '../../lib/db/types';
 import { getTodayReview, getWeakPoints, type ReviewItem } from '../../lib/services/practice';
 import { listQuestionsByPoints, startQuickPractice } from '../../lib/services/quiz';
+import { installAllSeedOutlines } from '../../lib/seed';
 import { Alert, Badge, Button, Card, Empty, Loading, Progress, Stat } from '../../components/ui';
 
 interface WeakRow {
@@ -30,6 +31,7 @@ export function HomePage() {
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [fatal, setFatal] = useState('');
+  const [outlineCount, setOutlineCount] = useState(0);
 
   const load = useCallback(async () => {
     try {
@@ -47,11 +49,13 @@ export function HomePage() {
       const attempts = await db.attempts.toArray();
       setRecent(attempts.sort((a, b) => b.startedAt - a.startedAt).slice(0, 3));
 
-      const [questions, points, mastery] = await Promise.all([
+      const [questions, points, mastery, outlineTotal] = await Promise.all([
         db.questions.count(),
         db.knowledgePoints.count(),
         db.mastery.toArray(),
+        db.outlines.count(),
       ]);
+      setOutlineCount(outlineTotal);
       const answered = mastery.reduce((s, m) => s + m.attempts, 0);
       const correct = mastery.reduce((s, m) => s + m.correct, 0);
       setStats({
@@ -94,6 +98,21 @@ export function HomePage() {
     }
   }
 
+  /** 一键装上内置起步大纲 */
+  async function installSeed() {
+    setBusy('seed');
+    setError('');
+    try {
+      const n = await installAllSeedOutlines();
+      await load();
+      setError(n > 0 ? '' : '内置大纲已经装过了。');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy('');
+    }
+  }
+
   if (loading) return <Loading />;
 
   if (fatal) {
@@ -122,6 +141,25 @@ export function HomePage() {
         </Alert>
       )}
       {error && <Alert tone="error">{error}</Alert>}
+
+      {/* ---------------- 新用户引导 ---------------- */}
+      {outlineCount === 0 && (
+        <Card title="👋 从这里开始">
+          <p className="small muted" style={{ marginTop: 0 }}>
+            你还没有任何知识大纲。最快的开始方式是装上<b>内置起步大纲</b>——
+            四条学习线（电工基础 / PLC / 低压电工证 / 电工中级）的知识点都整理好了，
+            <b>不用找材料、不用调模型，装上就能出题</b>。
+          </p>
+          <div className="btn-row">
+            <Button variant="accent" loading={busy === 'seed'} onClick={installSeed}>
+              装上四条线的起步大纲
+            </Button>
+            <Button variant="ghost" onClick={() => navigate('/materials')}>
+              我自己导入材料
+            </Button>
+          </div>
+        </Card>
+      )}
 
       {/* ---------------- 概览 ---------------- */}
       <Card title="📈 学习概览">

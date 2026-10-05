@@ -7,6 +7,13 @@ import { db, getDefaultLLM } from '../../lib/db/db';
 import type { Material, Outline, TrackId } from '../../lib/db/types';
 import { TRACK_HINTS, TRACK_LABELS } from '../../lib/db/types';
 import { deleteOutline, generateOutline, listOutlines } from '../../lib/services/outline';
+import {
+  SEED_OUTLINES,
+  countSeedNodes,
+  installAllSeedOutlines,
+  installSeedOutline,
+  installedSeedTracks,
+} from '../../lib/seed';
 import { Alert, Badge, Button, Card, Empty, Field, Loading, Select, TextArea } from '../../components/ui';
 
 const TRACK_OPTIONS = (Object.keys(TRACK_LABELS) as TrackId[]).map((t) => ({
@@ -26,13 +33,48 @@ export function OutlineListPage() {
   const [stream, setStream] = useState('');
   const [message, setMessage] = useState<{ tone: 'ok' | 'error' | 'warn'; text: string } | null>(null);
   const [hasModel, setHasModel] = useState(true);
+  const [installedSeed, setInstalledSeed] = useState<Set<TrackId>>(new Set());
+  const [seedBusy, setSeedBusy] = useState('');
 
   const load = useCallback(async () => {
-    const [os, ms, cfg] = await Promise.all([listOutlines(), db.materials.toArray(), getDefaultLLM('text')]);
+    const [os, ms, cfg, seed] = await Promise.all([
+      listOutlines(),
+      db.materials.toArray(),
+      getDefaultLLM('text'),
+      installedSeedTracks(),
+    ]);
     setOutlines(os);
     setMaterials(ms.sort((a, b) => b.createdAt - a.createdAt));
     setHasModel(Boolean(cfg));
+    setInstalledSeed(seed);
   }, []);
+
+  /** 安装内置起步大纲（不调用大模型） */
+  async function addSeed(track: TrackId | 'all') {
+    setSeedBusy(track);
+    setMessage(null);
+    try {
+      let count = 0;
+      if (track === 'all') {
+        count = await installAllSeedOutlines();
+      } else {
+        await installSeedOutline(track);
+        count = 1;
+      }
+      await load();
+      setMessage({
+        tone: count > 0 ? 'ok' : 'warn',
+        text:
+          count > 0
+            ? `已添加 ${count} 套内置大纲，现在可以直接去「练习」页出题了（不需要材料，也不花 token）。`
+            : '这几套已经装过了。',
+      });
+    } catch (e) {
+      setMessage({ tone: 'error', text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setSeedBusy('');
+    }
+  }
 
   useEffect(() => {
     void load();
@@ -89,6 +131,60 @@ export function OutlineListPage() {
         </Alert>
       )}
       {message && <Alert tone={message.tone === 'warn' ? 'warn' : message.tone}>{message.text}</Alert>}
+
+      {/* ---------------- 内置起步大纲 ---------------- */}
+      <Card
+        title="📦 内置起步大纲"
+        extra={<Badge tone={installedSeed.size === SEED_OUTLINES.length ? 'ok' : 'primary'}>
+          {installedSeed.size}/{SEED_OUTLINES.length} 已装
+        </Badge>}
+      >
+        <p className="small muted" style={{ marginTop: 0 }}>
+          还没找到合适的材料？这四套知识点是我按考试范围和由浅入深的顺序整理好的，
+          <b>装上就能直接出题</b>，不需要材料、不调用大模型、不花一分钱。
+        </p>
+        <div className="col">
+          {SEED_OUTLINES.map((seed) => {
+            const done = installedSeed.has(seed.track);
+            return (
+              <div key={seed.track} className="card tight" style={{ margin: 0 }}>
+                <div className="row between">
+                  <div className="grow" style={{ minWidth: 0 }}>
+                    <div className="row wrap" style={{ gap: 6 }}>
+                      <strong className="small">{TRACK_LABELS[seed.track]}</strong>
+                      <Badge>{countSeedNodes(seed.nodes)} 个知识点</Badge>
+                      {done && <Badge tone="ok">已装</Badge>}
+                    </div>
+                    <div className="small faint" style={{ marginTop: 4 }}>
+                      {seed.description}
+                    </div>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant={done ? 'ghost' : 'primary'}
+                    disabled={done}
+                    loading={seedBusy === seed.track}
+                    onClick={() => addSeed(seed.track)}
+                  >
+                    {done ? '已添加' : '添加'}
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+        <div className="btn-row" style={{ marginTop: 12 }}>
+          <Button
+            variant="accent"
+            block
+            disabled={installedSeed.size === SEED_OUTLINES.length}
+            loading={seedBusy === 'all'}
+            onClick={() => addSeed('all')}
+          >
+            一键装上全部四条线
+          </Button>
+        </div>
+      </Card>
 
       {/* ---------------- 生成新大纲 ---------------- */}
       <Card title="🪄 生成新大纲">

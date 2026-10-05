@@ -33,6 +33,7 @@ const {
   getWeakPoints,
   generateMicroLesson,
 } = await import('./practice');
+const { installSeedOutline } = await import('../seed');
 
 /* ------------------------------ 固定应答 ------------------------------ */
 
@@ -377,6 +378,31 @@ describe('完整学习闭环', () => {
     // 讲义本身留档在材料表里
     const mats = await db.materials.toArray();
     expect(mats.some((m) => m.title.startsWith('补强讲义：'))).toBe(true);
+  });
+});
+
+describe('内置起步大纲', () => {
+  it('不需要任何材料就能出题，且能模糊匹配到内置知识点', async () => {
+    const { outline, points } = await installSeedOutline('fundamental');
+    expect(outline.seed).toBe(true);
+    expect(outline.materialIds).toEqual([]); // 内置大纲不依赖任何材料
+
+    const questions = await generateQuestions({
+      outlineId: outline.id,
+      track: 'fundamental',
+      allocation: [{ pointId: points[0].id, count: 1 }],
+      typeMix: [{ type: 'single', count: 1 }],
+      difficultyMix: '标准',
+      withMaterial: true, // 即使要求"参考资料"，没有材料也不该报错
+    });
+    expect(questions.length).toBeGreaterThan(0);
+
+    // 模型返回的知识点是"欧姆定律"，内置节点叫"欧姆定律及其应用"，
+    // matchPointIds 的包含匹配应该能对上
+    const single = questions.find((q) => q.type === 'single')!;
+    expect(single.knowledgePointIds.length).toBeGreaterThan(0);
+    const matched = points.find((p) => p.id === single.knowledgePointIds[0]);
+    expect(matched?.name).toContain('欧姆定律');
   });
 });
 

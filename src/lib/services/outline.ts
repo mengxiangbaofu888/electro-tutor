@@ -87,24 +87,50 @@ export async function generateOutline(params: {
   const draft = parseJsonLoose<{ title: string; nodes: OutlineNodeDraft[] }>(draftText, '大纲');
   if (!draft.nodes?.length) throw new Error('模型没有生成任何知识点，可能是材料内容太少，请换一份更完整的材料再试。');
 
+  const result = await createOutlineFromNodes({
+    title: title?.trim() || draft.title || materials[0].title,
+    track,
+    nodes: draft.nodes,
+    materialIds,
+  });
+
+  // 标记材料属于哪条线，方便后续筛选
+  await db.transaction('rw', db.materials, async () => {
+    for (const m of materials) await db.materials.update(m.id, { track });
+  });
+
+  return result;
+}
+
+/**
+ * 把一棵知识点草稿树落库成大纲。
+ * AI 生成的大纲与内置起步大纲共用这一条路径，保证两者结构完全一致。
+ */
+export async function createOutlineFromNodes(params: {
+  title: string;
+  track: TrackId;
+  nodes: OutlineNodeDraft[];
+  materialIds?: ID[];
+}): Promise<OutlineGenerateResult> {
+  const { title, track, nodes, materialIds = [] } = params;
+  if (!nodes.length) throw new Error('没有任何知识点，无法创建大纲。');
+
   const outlineId = newId();
   const points: KnowledgePoint[] = [];
-  flatten(draft.nodes, outlineId, undefined, 1, { n: 0 }, points);
+  flatten(nodes, outlineId, undefined, 1, { n: 0 }, points);
 
   const outline: Outline = {
     id: outlineId,
-    title: title?.trim() || draft.title || materials[0].title,
+    title,
     track,
     materialIds,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
 
-  await db.transaction('rw', db.outlines, db.knowledgePoints, db.materials, async () => {
+  await db.transaction('rw', db.outlines, db.knowledgePoints, async () => {
     await db.outlines.put(outline);
     await db.knowledgePoints.bulkPut(points);
-    // 标记材料属于哪条线，方便后续筛选
-    for (const m of materials) await db.materials.update(m.id, { track });
   });
 
   return { outline, points };
