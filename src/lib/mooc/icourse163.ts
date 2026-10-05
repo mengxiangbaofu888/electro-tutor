@@ -368,14 +368,20 @@ export async function fetchMoocCourse(params: {
   };
 }
 
-/** 从课程页 HTML 里捞课程标题（页面里有 termId 附近的一坨 JSON） */
+/**
+ * 从课程页 HTML 里捞课程名。
+ *
+ * 页面里的标题长这样（真实数据）：
+ *   电工技术_常州机电职业技术学院_中国大学MOOC(慕课)
+ * 我们只要课程名本身，所以先按分隔符取第一段，再去掉平台后缀。
+ */
 export function extractCourseTitle(html: string): string {
-  const m = /"name"\s*:\s*"([^"]{2,80})"/.exec(html) ?? /<title>([^<]{2,80})<\/title>/.exec(html);
+  const m =
+    /"name"\s*:\s*"([^"]{2,120})"/.exec(html) ?? /<title>([^<]{2,120})<\/title>/.exec(html);
   if (!m) return '';
-  const raw = m[1].replace(/_中国大学MOOC.*$/, '').replace(/\(慕课\).*$/, '').trim();
-  try {
-    return decodeURIComponent(escape(raw));
-  } catch {
-    return raw;
-  }
+  const first = m[1].trim().split(/[_｜|]/)[0].trim();
+  return first
+    .replace(/\s*-?\s*中国大学MOOC.*$/, '')
+    .replace(/[（(]慕课[)）]/g, '')
+    .trim();
 }

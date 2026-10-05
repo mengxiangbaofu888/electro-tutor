@@ -233,12 +233,19 @@ describe('课程 → 材料正文', () => {
   });
 });
 
-describe('从课程页里捞标题', () => {
+describe('从课程页里捞课程名', () => {
   it('优先取页面里的 name 字段', () => {
     expect(extractCourseTitle('<script>{"name":"电工技术","termId":"1"}</script>')).toBe('电工技术');
   });
 
-  it('退而取 <title>', () => {
+  it('真实页面那种带学校和平台后缀的标题，只留课程名', () => {
+    // 这是实测从 icourse163 课程页里抓到的原文
+    expect(
+      extractCourseTitle('<title>电工技术_常州机电职业技术学院_中国大学MOOC(慕课)</title>'),
+    ).toBe('电工技术');
+  });
+
+  it('退而取 <title>，并去掉平台后缀', () => {
     expect(extractCourseTitle('<title>电工技术_中国大学MOOC(慕课)</title>')).toBe('电工技术');
   });
 
