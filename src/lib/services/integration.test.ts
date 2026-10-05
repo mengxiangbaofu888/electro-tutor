@@ -404,6 +404,21 @@ describe('内置起步大纲', () => {
     const matched = points.find((p) => p.id === single.knowledgePointIds[0]);
     expect(matched?.name).toContain('欧姆定律');
   });
+
+  it('没做过任何题，也能让老师直接讲解某个知识点', async () => {
+    // 对应大纲树里的「讲」按钮：不依赖错题记录，纯讲解
+    const { points } = await installSeedOutline('plc');
+    const target = points[2];
+    const lesson = await generateMicroLesson({ pointId: target.id, track: 'plc' });
+    expect(lesson.title).toBeTruthy();
+    expect(lesson.body).toContain('##');
+    // 巩固题要进题库，且挂在正确的知识点上
+    const drills = await db.questions.where('knowledgePointIds').equals(target.id).toArray();
+    expect(drills.length).toBeGreaterThan(0);
+    // 讲解本身要留档，方便回看
+    const mats = await db.materials.toArray();
+    expect(mats.some((m) => m.title.startsWith('补强讲义：'))).toBe(true);
+  });
 });
 
 describe('边界与容错', () => {

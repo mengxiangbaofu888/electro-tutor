@@ -15,7 +15,9 @@ import {
   type PointNode,
 } from '../../lib/services/outline';
 import { currentScore } from '../../lib/srs';
+import { generateMicroLesson } from '../../lib/services/practice';
 import { Alert, Badge, Button, Card, Empty, Field, Loading, Sheet, TextArea, TextInput } from '../../components/ui';
+import { Markdown } from '../../components/Markdown';
 
 export function OutlineDetailPage() {
   const { outlineId = '' } = useParams();
@@ -27,6 +29,11 @@ export function OutlineDetailPage() {
   const [editing, setEditing] = useState<KnowledgePoint | null>(null);
   const [adding, setAdding] = useState<{ parentId?: string } | null>(null);
   const [message, setMessage] = useState('');
+  // 「让老师讲一遍」：按需为任意知识点生成一段讲解
+  const [lesson, setLesson] = useState<{ title: string; body: string } | null>(null);
+  const [explaining, setExplaining] = useState('');
+  const [lessonStream, setLessonStream] = useState('');
+  const [lessonError, setLessonError] = useState('');
 
   const load = useCallback(async () => {
     if (!outlineId) return;
@@ -46,6 +53,27 @@ export function OutlineDetailPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  /** 让大模型针对某个知识点写一段讲解（不需要先做错题） */
+  async function explain(point: KnowledgePoint) {
+    setExplaining(point.id);
+    setLesson(null);
+    setLessonStream('');
+    setLessonError('');
+    try {
+      const draft = await generateMicroLesson({
+        pointId: point.id,
+        track: outline?.track ?? 'fundamental',
+        onProgress: (d) => setLessonStream((prev) => (prev + d).slice(-2000)),
+      });
+      setLesson({ title: draft.title, body: draft.body });
+    } catch (e) {
+      setLessonError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setExplaining('');
+      setLessonStream('');
+    }
+  }
 
   if (!points || !outline) return <Loading />;
 
@@ -94,6 +122,14 @@ export function OutlineDetailPage() {
             {node.summary && <div className="small faint">{node.summary}</div>}
           </div>
           <div className="row" style={{ gap: 4 }}>
+            <button
+              className="tree-toggle"
+              title="让老师讲一遍这个知识点"
+              disabled={explaining === node.id}
+              onClick={() => explain(node)}
+            >
+              讲
+            </button>
             <button className="tree-toggle" title="添加子知识点" onClick={() => setAdding({ parentId: node.id })}>
               ＋
             </button>
@@ -150,7 +186,7 @@ export function OutlineDetailPage() {
         </div>
       </Card>
 
-      <Card title="🌳 知识点树">
+      <Card title="🌳 知识点树" extra={<span className="small faint">点「讲」让老师讲一遍</span>}>
         {points.length === 0 ? (
           <Empty icon="🌳" text="这份大纲还没有知识点" hint="重新生成，或手动添加" />
         ) : (
@@ -208,6 +244,46 @@ export function OutlineDetailPage() {
       {/* 新增弹层 */}
       <Sheet open={Boolean(adding)} title="新增知识点" onClose={() => setAdding(null)}>
         {adding && <AddPointForm parentId={adding.parentId} outlineId={outline.id} onDone={async () => { setAdding(null); setMessage('已添加。'); await load(); }} />}
+      </Sheet>
+
+      {/* 讲解弹层：不需要先做错题，直接针对知识点问 */}
+      <Sheet
+        open={Boolean(explaining) || Boolean(lesson) || Boolean(lessonError)}
+        title={lesson?.title ?? (lessonError ? '讲解生成失败' : '老师正在备课…')}
+        onClose={() => {
+          setLesson(null);
+          setLessonError('');
+          setExplaining('');
+          setLessonStream('');
+        }}
+      >
+        {explaining && (
+          <>
+            <div className="row" style={{ gap: 10, marginBottom: 12 }}>
+              <span className="spinner" />
+              <span className="small">正在针对这个知识点写讲解…</span>
+            </div>
+            {lessonStream && (
+              <div className="small mono pre-wrap" style={{ maxHeight: 160, overflowY: 'auto' }}>
+                {lessonStream}
+              </div>
+            )}
+          </>
+        )}
+        {lessonError && <Alert tone="error">{lessonError}</Alert>}
+        {lesson && <Markdown text={lesson.body} />}
+        {lesson && (
+          <div className="btn-row" style={{ marginTop: 14 }}>
+            <Button
+              variant="primary"
+              onClick={() => {
+                setLesson(null);
+              }}
+            >
+              看完了
+            </Button>
+          </div>
+        )}
       </Sheet>
     </>
   );
