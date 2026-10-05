@@ -14,6 +14,7 @@ import QRCode from 'qrcode';
 import { describe, expect, it, vi } from 'vitest';
 import {
   classifyScan,
+  cropLuminance,
   decodeImageData,
   decodeLuminance,
   formatIsbn,
@@ -23,6 +24,8 @@ import {
   normalizeIsbn,
   rgbaToLuminance,
   rotate90Luminance,
+  scaleUpLuminance,
+  tileRanges,
   decodeDataUrl,
 } from './decode';
 
@@ -78,13 +81,25 @@ describe('真二维码能被解出来', () => {
 describe('解不出来时不能崩、也不能瞎猜', () => {
   it('空白图返回 null（而不是抛异常或编一个结果）', () => {
     const lum = new Uint8ClampedArray(200 * 200).fill(255);
-    expect(decodeLuminance(lum, 200, 200)).toBeNull();
+    expect(decodeLuminance(lum, 200, 200, { timeBudgetMs: 800 })).toBeNull();
   });
 
   it('随机噪点返回 null', () => {
     const lum = new Uint8ClampedArray(120 * 120);
     for (let i = 0; i < lum.length; i++) lum[i] = (i * 7919) % 256;
-    expect(decodeLuminance(lum, 120, 120)).toBeNull();
+    expect(decodeLuminance(lum, 120, 120, { timeBudgetMs: 800 })).toBeNull();
+  });
+
+  it('时间预算真的生效：没有码的图不会让用户一直等', () => {
+    // 500x500 噪点，没有任何码；给 150ms 预算就必须在 150ms 附近放弃
+    const lum = new Uint8ClampedArray(500 * 500);
+    for (let i = 0; i < lum.length; i++) lum[i] = (i * 2654435761) % 256;
+    const t0 = Date.now();
+    const hit = decodeLuminance(lum, 500, 500, { timeBudgetMs: 150 });
+    const spent = Date.now() - t0;
+    expect(hit).toBeNull();
+    // 允许一次尝试的超出量，但绝不该跑成几秒
+    expect(spent).toBeLessThan(2500);
   });
 
   it('尺寸不合法时返回 null', () => {
@@ -176,6 +191,80 @@ describe('从 ImageData / dataURL 走一遍（照片进 App 的真实路径）',
       getContext.mockRestore();
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe('分块解码：对付"码在整张照片里太小"', () => {
+  it('切块带重叠，且都落在图内', () => {
+    const tiles = tileRanges(1000, 800, 2, 0.25);
+    expect(tiles).toHaveLength(4);
+    for (const t of tiles) {
+      expect(t.x).toBeGreaterThanOrEqual(0);
+      expect(t.y).toBeGreaterThanOrEqual(0);
+      expect(t.x + t.width).toBeLessThanOrEqual(1000);
+      expect(t.y + t.height).toBeLessThanOrEqual(800);
+    }
+    // 相邻块之间必须有重叠，否则码正好被切在边界上就永远解不出来
+    const right = tiles.find((t) => t.x > 0)!;
+    expect(right.x).toBeLessThan(500);
+  });
+
+  it('裁块取的是正确的像素', () => {
+    // 4x3 的图，值 = 行号*10 + 列号
+    const src = new Uint8ClampedArray(12);
+    for (let y = 0; y < 3; y++) for (let x = 0; x < 4; x++) src[y * 4 + x] = y * 10 + x;
+    const crop = cropLuminance(src, 4, 3, { x: 1, y: 1, width: 2, height: 2 });
+    expect(Array.from(crop)).toEqual([11, 12, 21, 22]);
+  });
+
+  it('放大是最近邻复制，不引入新值', () => {
+    const up = scaleUpLuminance(new Uint8ClampedArray([1, 2, 3, 4]), 2, 2, 2);
+    expect(up.width).toBe(4);
+    expect(up.height).toBe(4);
+    expect(Array.from(up.lum.slice(0, 4))).toEqual([1, 1, 2, 2]);
+    expect(Array.from(up.lum.slice(4, 8))).toEqual([1, 1, 2, 2]);
+    expect(new Set(Array.from(up.lum))).toEqual(new Set([1, 2, 3, 4]));
+  });
+
+  it('二维码只占大图一角时（模拟拍整张封底）依然能解出来', () => {
+    const url = 'http://weixin.qq.com/r/SMALL-CODE-TEST';
+    const qr = qrToLuminance(url, 3, 2); // 小尺寸二维码
+    const big = 1400;
+    const canvas = new Uint8ClampedArray(big * big).fill(255);
+    const ox = 980; // 放到右侧偏上，模拟封底上的小码
+    const oy = 210;
+    for (let y = 0; y < qr.dim; y++) {
+      for (let x = 0; x < qr.dim; x++) {
+        canvas[(oy + y) * big + (ox + x)] = qr.lum[y * qr.dim + x];
+      }
+    }
+    const hit = decodeLuminance(canvas, big, big);
+    expect(hit, '小码没解出来').toBeTruthy();
+    expect(hit!.text).toBe(url);
+  });
+});
+
+describe('真照片回归：用户拍的《零基础学电工》条码', () => {
+  it('从真实照片里解出 ISBN 并通过校验', async () => {
+    // 注意：jsdom 环境下 import.meta.url 是 http 协议，fileURLToPath 会拒绝，
+    // 所以用 cwd 拼路径（vitest 的工作目录就是项目根）。
+    const { join } = await import('node:path');
+    const { Jimp } = (await import('jimp')) as unknown as {
+      Jimp: {
+        read: (
+          p: string,
+        ) => Promise<{ bitmap: { width: number; height: number; data: Uint8Array } }>;
+      };
+    };
+    const path = join(process.cwd(), 'src', 'lib', 'scan', '__fixtures__', 'isbn-barcode.jpg');
+    const img = await Jimp.read(path);
+    const bm = img.bitmap;
+    const hit = decodeLuminance(rgbaToLuminance(bm.data, bm.width, bm.height), bm.width, bm.height);
+    expect(hit, '真照片没解出条码').toBeTruthy();
+    expect(hit!.format).toBe('EAN_13');
+    expect(hit!.text).toBe('9787111589549');
+    expect(normalizeIsbn(hit!.text)).toBe('9787111589549');
+    expect(formatIsbn(hit!.text)).toBe('978-7-111-58954-9');
   });
 });
 

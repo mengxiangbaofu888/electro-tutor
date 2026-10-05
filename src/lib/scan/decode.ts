@@ -82,6 +82,84 @@ export function rotate90Luminance(
   return out;
 }
 
+export interface TileRange {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * 把图切成 grid×grid 个**带重叠**的小块。
+ *
+ * 为什么要重叠：不重叠的话，码正好被切在边界上就永远解不出来。
+ * 为什么要分块：用户拍的是整张封底，二维码可能只占画面 1/10，
+ * 直接整张解经常失败——切小块等于"局部放大"，这是标准解法。
+ */
+export function tileRanges(
+  width: number,
+  height: number,
+  grid: number,
+  overlapRatio = 0.25,
+): TileRange[] {
+  if (grid < 2 || width <= 0 || height <= 0) return [];
+  const tileW = Math.ceil(width / grid);
+  const tileH = Math.ceil(height / grid);
+  const padX = Math.round(tileW * overlapRatio);
+  const padY = Math.round(tileH * overlapRatio);
+  const out: TileRange[] = [];
+  for (let gy = 0; gy < grid; gy++) {
+    for (let gx = 0; gx < grid; gx++) {
+      const x = Math.max(0, gx * tileW - padX);
+      const y = Math.max(0, gy * tileH - padY);
+      const w = Math.min(width - x, tileW + padX * 2);
+      const h = Math.min(height - y, tileH + padY * 2);
+      if (w > 0 && h > 0) out.push({ x, y, width: w, height: h });
+    }
+  }
+  return out;
+}
+
+/** 从大图里裁一块出来（超出边界的部分自动裁掉，不抛异常） */
+export function cropLuminance(
+  luminance: Uint8ClampedArray,
+  width: number,
+  height: number,
+  r: TileRange,
+): Uint8ClampedArray {
+  const w = Math.max(0, Math.min(r.width, width - r.x));
+  const h = Math.max(0, Math.min(r.height, height - r.y));
+  const out = new Uint8ClampedArray(w * h);
+  for (let y = 0; y < h; y++) {
+    const src = (r.y + y) * width + r.x;
+    out.set(luminance.subarray(src, src + w), y * w);
+  }
+  return out;
+}
+
+/** 按整数倍最近邻放大：小码放大后 ZXing 的检测器更容易命中（不引入虚假细节） */
+export function scaleUpLuminance(
+  luminance: Uint8ClampedArray,
+  width: number,
+  height: number,
+  factor = 2,
+): { lum: Uint8ClampedArray; width: number; height: number } {
+  if (factor <= 1) return { lum: luminance, width, height };
+  const w = width * factor;
+  const h = height * factor;
+  const out = new Uint8ClampedArray(w * h);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const v = luminance[y * width + x];
+      for (let dy = 0; dy < factor; dy++) {
+        const row = (y * factor + dy) * w + x * factor;
+        for (let dx = 0; dx < factor; dx++) out[row + dx] = v;
+      }
+    }
+  }
+  return { lum: out, width: w, height: h };
+}
+
 function tryDecodeOnce(
   luminance: Uint8ClampedArray,
   width: number,
@@ -101,16 +179,59 @@ function tryDecodeOnce(
 /**
  * 纯解码：给一张灰度图，返回码里的内容；解不出来返回 null（**不抛异常**）。
  *
- * 依次试四种拍法，覆盖最常见的几种"拍不好"：
- *   正相 → 反相（深底浅码） → 转 90° → 转 90° 再反相
+ * 分三层试，越往后越费时间，但能救回越难拍的照片：
+ *
+ * ① 整张图，四种拍法：正相 → 反相（深底浅码） → 转 90° → 转 90° 再反相
+ * ② 分块（2×2 / 3×3 带重叠）再试：正相 + 反相（二维码本身不怕转，一维码在书上是横的，
+ *    所以分块阶段不再试旋转，省一半时间）—— 对付"码在整张照片里太小"
+ * ③ 分块 ×2 最近邻放大再试 —— 对付"码更小"
+ *
+ * ②③ 是从真实照片里学到的：用户拍整张封底时，二维码只占画面很小一块，
+ * 只试整张图会**全部失败**（实测过），切块后就解出来了。
+ *
+ * **时间预算**：没有任何码的照片会走完所有分支（上百次尝试）。实测噪点图要 5 秒以上，
+ * 大照片更久，用户会以为卡死。所以给一个预算，到点就放弃并如实返回 null，
+ * 由界面提示"靠近一点重拍"。
  */
 export function decodeLuminance(
   luminance: Uint8ClampedArray,
   width: number,
   height: number,
+  options: { timeBudgetMs?: number } = {},
 ): ScanCode | null {
   if (width <= 0 || height <= 0 || luminance.length < width * height) return null;
 
+  const budget = options.timeBudgetMs ?? 3500;
+  const started = Date.now();
+  const outOfTime = () => Date.now() - started > budget;
+
+  // ① 整张（二维码可能拍得很大，这一层最快命中）
+  const full = tryAllVariants(luminance, width, height);
+  if (full) return full;
+
+  // ②③ 分块 + 放大
+  for (const grid of [2, 3]) {
+    for (const tile of tileRanges(width, height, grid)) {
+      if (outOfTime()) return null;
+      const crop = cropLuminance(luminance, width, height, tile);
+      const hit = tryPlainVariants(crop, tile.width, tile.height);
+      if (hit) return hit;
+
+      if (outOfTime()) return null;
+      const up = scaleUpLuminance(crop, tile.width, tile.height, 2);
+      const hit2 = tryPlainVariants(up.lum, up.width, up.height);
+      if (hit2) return hit2;
+    }
+  }
+  return null;
+}
+
+/** 四种拍法：正相 / 反相 / 转 90° / 转 90° 再反相（整张图用这套） */
+function tryAllVariants(
+  luminance: Uint8ClampedArray,
+  width: number,
+  height: number,
+): ScanCode | null {
   const rotated = rotate90Luminance(luminance, width, height);
   const attempts: Array<{ lum: Uint8ClampedArray; w: number; h: number }> = [
     { lum: luminance, w: width, h: height },
@@ -118,13 +239,29 @@ export function decodeLuminance(
     { lum: rotated, w: height, h: width },
     { lum: invertLuminance(rotated), w: height, h: width },
   ];
-
   for (const a of attempts) {
     try {
       const hit = tryDecodeOnce(a.lum, a.w, a.h);
       if (hit) return hit;
     } catch {
       // ZXing 解不出来就是抛异常，这是它的正常控制流，继续试下一种
+    }
+  }
+  return null;
+}
+
+/** 两种拍法：正相 + 反相（分块阶段用这套，省一半时间） */
+function tryPlainVariants(
+  luminance: Uint8ClampedArray,
+  width: number,
+  height: number,
+): ScanCode | null {
+  for (const lum of [luminance, invertLuminance(luminance)]) {
+    try {
+      const hit = tryDecodeOnce(lum, width, height);
+      if (hit) return hit;
+    } catch {
+      /* 继续 */
     }
   }
   return null;
