@@ -206,8 +206,66 @@ export async function createOutlineFromNodes(params: {
   return { outline, points };
 }
 
-/** 读取某大纲下的全部知识点，按 order 排序 */
-export async function getOutlinePoints(outlineId: ID): Promise<KnowledgePoint[]> {
+/**
+ * 这条材料**自带的**结构化标题（有就能本地拼大纲，不用调模型）。
+ *
+ * 通用规则，不针对任何一本特定的书或某一门课：
+ *   · 慕课导入时会把课时目录存进 `sections`
+ *   · 教材扫码时会把微课标题存在 `book.microLessons`
+ * 两条来源都只是"一串标题"，谁来了都一样处理。
+ */
+export function materialSections(m: Material): string[] {
+  if (m.sections?.length) return m.sections.filter((s) => s.trim().length > 0);
+  const micros = m.book?.microLessons ?? [];
+  return micros.map((x) => x.title).filter((t) => t && t.trim().length > 0);
+}
+
+/**
+ * 把"一串标题"变成大纲节点（**纯函数，不调用任何模型**）。
+ *
+ * 为什么这一步不需要模型：标题本身就是知识点的骨架。
+ * 让模型去"归纳"一遍现成的课时目录，只会更慢、更贵、还可能改错名字。
+ *
+ * 为什么**不自己编章节名**：我们只知道标题长什么样，不知道它是"第几讲"还是"第几章"，
+ * 编一个"第 11 讲"很可能与你书上写的不一致。所以只按标题原样铺开，
+ * 顺序保持和来源一致——这比编一个错的结构强。
+ *
+ * 什么时候不能用它：材料是一整篇没有小标题的文字（PDF/笔记/截图转写），
+ * 那就没有现成结构，必须让模型读一遍再归纳（走 generateOutline）。
+ */
+export function titlesToNodes(titles: string[]): OutlineNodeDraft[] {
+  const seen = new Set<string>();
+  const nodes: OutlineNodeDraft[] = [];
+  for (const raw of titles) {
+    const name = String(raw ?? '').trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    nodes.push({ name, summary: '', importance: 3 });
+  }
+  return nodes;
+}
+
+/**
+ * 用一串标题直接建大纲（秒出、不花钱）。titles 至少给两个才有意义。
+ */
+export async function createOutlineFromTitles(params: {
+  title: string;
+  track: TrackId;
+  titles: string[];
+  materialIds?: ID[];
+}): Promise<OutlineGenerateResult> {
+  const { title, track, titles, materialIds = [] } = params;
+  const nodes = titlesToNodes(titles);
+  if (nodes.length < 2) {
+    throw new Error(
+      '这条材料里没有可用的标题清单（至少要两个）。' +
+        '慕课链接和教材扫码会自带标题；文档/笔记/截图这类要用 AI 生成大纲。',
+    );
+  }
+  return createOutlineFromNodes({ title, track, nodes, materialIds });
+}
+
+/** 读取某大纲下的全部知识点，按 order 排序 */export async function getOutlinePoints(outlineId: ID): Promise<KnowledgePoint[]> {
   const points = await db.knowledgePoints.where('outlineId').equals(outlineId).toArray();
   return points.sort((a, b) => a.order - b.order);
 }

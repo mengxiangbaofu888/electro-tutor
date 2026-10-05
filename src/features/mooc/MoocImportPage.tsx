@@ -24,6 +24,7 @@ import {
 } from '../../lib/mooc/icourse163';
 import { createMoocHttp } from '../../lib/platform/mooc-http';
 import { importQuestionRows } from '../../lib/services/bank';
+import { createOutlineFromTitles } from '../../lib/services/outline';
 import { Alert, Badge, Button, Card, Field, Select, TextInput } from '../../components/ui';
 
 const TRACK_OPTIONS = (Object.keys(TRACK_LABELS) as TrackId[]).map((k) => ({
@@ -128,6 +129,8 @@ export function MoocImportPage({ http: injected }: { http?: MoocHttp | null } = 
         charCount: buildCourseMaterialContent(course).length,
         track,
         createdAt: Date.now(),
+        // 课时目录就是这个材料**自带的**结构：有它就能直接拼大纲，不用调模型
+        sections: course.lessons.map((l) => l.name),
       });
 
       // 2) 大纲：同名就复用，避免重复导入时建出一堆同名大纲
@@ -216,6 +219,36 @@ export function MoocImportPage({ http: injected }: { http?: MoocHttp | null } = 
                   {i + 1}. {l.name}
                 </div>
               ))}
+            </div>
+            <div className="btn-row" style={{ marginTop: 10 }}>
+              <Button
+                loading={busy === 'outline'}
+                onClick={async () => {
+                  setBusy('outline');
+                  setMessage(null);
+                  try {
+                    const outline = await createOutlineFromTitles({
+                      title: `慕课：${course.courseTitle}`,
+                      track,
+                      titles: course.lessons.map((l) => l.name),
+                    });
+                    setMessage({
+                      tone: 'ok',
+                      text:
+                        `已用这 ${course.lessons.length} 个课时名直接建好大纲「${outline.outline.title}」` +
+                        `（${outline.points.length} 个知识点）—— **没有调用模型，秒出、不花钱**。` +
+                        '因为课时目录本身就是现成的结构，让模型再"归纳"一遍只会更慢还可能改错名字。',
+                    });
+                    navigate(`/outlines/${outline.outline.id}`);
+                  } catch (e) {
+                    setMessage({ tone: 'error', text: e instanceof Error ? e.message : String(e) });
+                  } finally {
+                    setBusy('');
+                  }
+                }}
+              >
+                用课时列表直接建大纲（不调模型）
+              </Button>
             </div>
           </Card>
 

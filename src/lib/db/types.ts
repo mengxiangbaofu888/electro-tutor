@@ -114,6 +114,11 @@ export interface Material {
   warnings?: string[];
   /** sourceType === 'book' 时：这一本的书目信息与微课清单 */
   book?: BookMeta;
+  /**
+   * 这条材料**自带的**结构化标题（慕课的课时目录等）。
+   * 有它就能**不用调模型**直接拼出大纲；没有就得让模型读一遍再归纳。
+   */
+  sections?: string[];
 }
 
 /** 知识大纲 */

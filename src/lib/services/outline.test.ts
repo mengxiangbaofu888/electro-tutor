@@ -12,13 +12,21 @@ import { db, newId } from '../db/db';
 import type {
   ID,
   KnowledgePoint,
+  Material,
   MistakeNote,
   Outline,
   Question,
   TrackId,
 } from '../db/types';
 import { createMastery } from '../srs';
-import { deleteOutline, normalizeOutlineNodes, removeKnowledgePoint } from './outline';
+import {
+  createOutlineFromTitles,
+  deleteOutline,
+  materialSections,
+  normalizeOutlineNodes,
+  removeKnowledgePoint,
+  titlesToNodes,
+} from './outline';
 
 /* ------------------------------ 造数据 ------------------------------ */
 
@@ -235,6 +243,80 @@ describe('normalizeOutlineNodes（模型返回的知识点树容错）', () => {
     expect(normalizeOutlineNodes(undefined)).toEqual({ nodes: [], dropped: 0 });
     expect(normalizeOutlineNodes('abc')).toEqual({ nodes: [], dropped: 0 });
     expect(normalizeOutlineNodes({ name: 'x' })).toEqual({ nodes: [], dropped: 0 });
+  });
+});
+
+/* ============================== 用现成标题直接建大纲 ============================== */
+
+describe('材料自带的标题清单（决定能不能不调模型）', () => {
+  it('慕课那种存了 sections 的，直接用', () => {
+    const m = { id: '1', title: 't', sections: ['第1讲 电路', '第2讲 电磁'] } as Material;
+    expect(materialSections(m)).toEqual(['第1讲 电路', '第2讲 电磁']);
+  });
+
+  it('教材那种没 sections 的，用扫到的微课标题', () => {
+    const m = {
+      id: '2',
+      title: '电工技术',
+      book: {
+        bookTitle: '电工技术',
+        microLessons: [
+          { id: 'a', url: 'u1', title: '11.1 触电急救', addedAt: 1 },
+          { id: 'b', url: 'u2', title: '11.2 电气火灾', addedAt: 2 },
+        ],
+      },
+    } as unknown as Material;
+    expect(materialSections(m)).toEqual(['11.1 触电急救', '11.2 电气火灾']);
+  });
+
+  it('什么都没有的材料返回空（这类只能让 AI 归纳）', () => {
+    expect(materialSections({ id: '3', title: 't' } as Material)).toEqual([]);
+    expect(
+      materialSections({ id: '4', title: 't', book: { bookTitle: 'x' } } as unknown as Material),
+    ).toEqual([]);
+  });
+
+  it('空白标题被过滤掉', () => {
+    expect(materialSections({ id: '5', title: 't', sections: ['甲', '  ', ''] } as Material)).toEqual([
+      '甲',
+    ]);
+  });
+});
+
+describe('把标题变成大纲节点（纯函数，不调模型）', () => {
+  it('按原样铺开，顺序不变、去掉空白、去掉重复', () => {
+    const nodes = titlesToNodes(['11.1 触电急救', ' 11.2 电气火灾 ', '', '11.1 触电急救']);
+    expect(nodes.map((n) => n.name)).toEqual(['11.1 触电急救', '11.2 电气火灾']);
+    expect(nodes.every((n) => n.importance === 3)).toBe(true);
+  });
+
+  it('**不自己编章节名**：标题里没有的层级就不造（编错了比不编更糟）', () => {
+    const nodes = titlesToNodes(['11.1 触电急救', '11.2 电气火灾']);
+    expect(nodes.every((n) => !n.children || n.children.length === 0)).toBe(true);
+  });
+});
+
+describe('直接建大纲', () => {
+  it('标题够多就真的建出来（大纲 + 知识点都入库，且不调模型）', async () => {
+    const res = await createOutlineFromTitles({
+      title: '慕课：电工技术',
+      track: 'fundamental',
+      titles: ['11.1 触电急救', '11.2 电气火灾', '第十一讲 单元测试'],
+    });
+    expect(res.points.map((p) => p.name)).toEqual([
+      '11.1 触电急救',
+      '11.2 电气火灾',
+      '第十一讲 单元测试',
+    ]);
+    expect(await db.outlines.count()).toBe(1);
+    expect(await db.knowledgePoints.count()).toBe(3);
+    // 这个测试里根本没配任何模型；能跑通就证明这条路没走 AI
+  });
+
+  it('标题太少（不足两个）时明确说清楚该怎么办', async () => {
+    await expect(
+      createOutlineFromTitles({ title: 'x', track: 'plc', titles: ['只有一个'] }),
+    ).rejects.toThrow(/至少要两个/);
   });
 });
 

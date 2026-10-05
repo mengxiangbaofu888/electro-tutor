@@ -8,7 +8,7 @@ import { db, getDefaultLLM, newId } from '../../lib/db/db';
 import type { Material, TrackId } from '../../lib/db/types';
 import { TRACK_HINTS, TRACK_LABELS } from '../../lib/db/types';
 import { extractBilibiliSubtitle, extractFromFile, extractFromUrl } from '../../lib/extract';
-import { visionExtract } from '../../lib/llm/client';
+import { createOutlineFromTitles, materialSections } from '../../lib/services/outline';import { visionExtract } from '../../lib/llm/client';
 import { compressImages, formatBytes } from '../../lib/platform/image';
 import { Alert, Badge, Button, Card, Empty, Field, Loading, Select, TextArea, TextInput } from '../../components/ui';
 
@@ -237,6 +237,37 @@ export function IngestPage() {
     await load();
   }
 
+  /**
+   * 材料**自带标题清单**时（慕课课时、书里的微课标题），直接拼出大纲。
+   * 不调模型：标题本身就是知识点的骨架，秒出、不花钱，也不会被模型改错名字。
+   * 没有标题清单的材料（PDF/笔记/截图）不显示这个按钮，那些仍需 AI 归纳。
+   */
+  async function quickOutline(m: Material) {
+    const titles = materialSections(m);
+    setBusy('outline');
+    setMessage(null);
+    try {
+      const res = await createOutlineFromTitles({
+        title: m.title,
+        track: m.track ?? track,
+        titles,
+        materialIds: [m.id],
+      });
+      setMessage({
+        tone: 'ok',
+        text:
+          `已用这条材料自带的 ${titles.length} 个标题直接建好大纲「${res.outline.title}」` +
+          `（${res.points.length} 个知识点）—— **没有调用模型**，秒出、不花钱。` +
+          '接下来去「练习」页就能按这些知识点出题。',
+      });
+      navigate(`/outlines/${res.outline.id}`);
+    } catch (e) {
+      setMessage({ tone: 'error', text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setBusy('');
+    }
+  }
+
   function toggleSelect(id: string) {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -440,6 +471,15 @@ export function IngestPage() {
                     {m.sourceType === 'book' && (
                       <Button size="sm" variant="ghost" onClick={() => navigate(`/book/${m.id}`)}>
                         补充微课 / 编辑
+                      </Button>
+                    )}
+                    {materialSections(m).length >= 2 && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => void quickOutline(m)}
+                      >
+                        直接建大纲（{materialSections(m).length} 个标题）
                       </Button>
                     )}
                     <Button size="sm" variant="danger" onClick={() => removeMaterial(m.id)}>
