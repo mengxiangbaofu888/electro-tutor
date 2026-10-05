@@ -16,8 +16,20 @@ import {
 } from '../../lib/services/outline';
 import { currentScore } from '../../lib/srs';
 import { generateMicroLesson } from '../../lib/services/practice';
+import { bankCsvTemplate, exportQuestionsCsv, importQuestionsCsv } from '../../lib/services/bank';
 import { Alert, Badge, Button, Card, Empty, Field, Loading, Sheet, TextArea, TextInput } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
+
+/** 触发浏览器下载一段文本 */
+function downloadText(text: string, filename: string, mime = 'text/plain;charset=utf-8') {
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 export function OutlineDetailPage() {
   const { outlineId = '' } = useParams();
@@ -34,6 +46,54 @@ export function OutlineDetailPage() {
   const [explaining, setExplaining] = useState('');
   const [lessonStream, setLessonStream] = useState('');
   const [lessonError, setLessonError] = useState('');
+  // 题库导入导出
+  const [bankBusy, setBankBusy] = useState('');
+  const [bankMsg, setBankMsg] = useState('');
+
+  /** 把这份大纲的题库导出成 CSV */
+  async function exportBank() {
+    if (!outline) return;
+    setBankBusy('export');
+    setBankMsg('');
+    try {
+      const { csv, count } = await exportQuestionsCsv(outline.id);
+      if (!count) {
+        setBankMsg('这份大纲下还没有题目，先把题生成出来再导出。');
+        return;
+      }
+      downloadText(csv, `${outline.title}-题库-${new Date().toISOString().slice(0, 10)}.csv`, 'text/csv;charset=utf-8');
+      setBankMsg(`已导出 ${count} 道题（UTF-8 CSV，Excel / WPS 可直接打开）。`);
+    } catch (e) {
+      setBankMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBankBusy('');
+    }
+  }
+
+  /** 从 CSV 导入题库到这份大纲 */
+  async function importBank(file: File) {
+    if (!outline) return;
+    setBankBusy('import');
+    setBankMsg('');
+    try {
+      const text = await file.text();
+      const res = await importQuestionsCsv({
+        text,
+        outlineId: outline.id,
+        onProgress: (done, total) => setBankMsg(`正在导入 ${done}/${total}…`),
+      });
+      if (!res.imported) {
+        setBankMsg(res.warnings.join('\n') || '没有导入任何题目。');
+        return;
+      }
+      setBankMsg([`成功导入 ${res.imported} 道题。`, ...res.warnings].join('\n'));
+      await load();
+    } catch (e) {
+      setBankMsg(`导入失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBankBusy('');
+    }
+  }
 
   const load = useCallback(async () => {
     if (!outlineId) return;
@@ -192,6 +252,43 @@ export function OutlineDetailPage() {
         ) : (
           <div>{tree.map((n) => renderNode(n, false))}</div>
         )}
+      </Card>
+
+      {/* 题库导入导出 */}
+      <Card title="📥 题库导入 / 导出">
+        <p className="small muted" style={{ marginTop: 0 }}>
+          找到现成的题库时（比如低压电工证的官方题库），整理成 CSV 就能导进来刷。
+          表头认中英文、列顺序随意。填空题多个空用 <code>;</code> 分隔，
+          同一个空的多种写法用 <code>|</code> 分隔。
+        </p>
+        {bankMsg && <Alert>{bankMsg}</Alert>}
+        <div className="btn-row">
+          <label className="btn primary">
+            导入 CSV
+            <input
+              type="file"
+              accept=".csv,.txt"
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) void importBank(f);
+                e.target.value = '';
+              }}
+            />
+          </label>
+          <Button loading={bankBusy === 'export'} onClick={exportBank}>
+            导出这份大纲的题库
+          </Button>
+          <Button
+            variant="ghost"
+            onClick={() => {
+              downloadText(bankCsvTemplate(), '题库导入模板.csv', 'text/csv;charset=utf-8');
+              setBankMsg('模板已下载，用 Excel / WPS 打开照着填就行。');
+            }}
+          >
+            下载导入模板
+          </Button>
+        </div>
       </Card>
 
       {/* 编辑弹层 */}

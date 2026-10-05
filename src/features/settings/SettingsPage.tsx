@@ -29,6 +29,7 @@ import { TRACK_LABELS } from '../../lib/db/types';
 import { PROVIDER_PRESETS, chatCompletionsUrl, makeConfig } from '../../lib/llm/presets';
 import { listModels, testConnection } from '../../lib/llm/client';
 import { refreshLearnerProfile } from '../../lib/services/practice';
+import { exportQuestionsCsv } from '../../lib/services/bank';
 import { Alert, Badge, Button, Card, Field, Loading, Select, Sheet, TextArea, TextInput } from '../../components/ui';
 
 const PROVIDER_OPTIONS = Object.entries(PROVIDER_PRESETS).map(([key, p]) => ({
@@ -156,8 +157,32 @@ export function SettingsPage() {
     }
   }
 
-  async function importBackup(file: File) {
-    setBusy('import');
+  /** 把题库导出成 CSV，方便用 Excel 查看、编辑、打印或分享 */
+  async function exportBank() {
+    setBusy('bank');
+    try {
+      const { csv, count } = await exportQuestionsCsv();
+      if (!count) {
+        setMessage({ tone: 'warn', text: '题库还是空的，先去「练习」页生成一些题目。' });
+        return;
+      }
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `电工陪练题库-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setMessage({
+        tone: 'ok',
+        text: `已导出 ${count} 道题（UTF-8 CSV，Excel / WPS 可直接打开）。想导回来去「大纲」页。`,
+      });
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function importBackup(file: File) {    setBusy('import');
     try {
       const text = await file.text();
       const dump = JSON.parse(text) as Record<string, unknown>;
@@ -363,6 +388,7 @@ export function SettingsPage() {
       <Card title="💾 数据备份">
         <p className="small muted" style={{ marginTop: 0 }}>
           所有数据都在手机本地。换手机前请先导出备份，否则会丢。
+          （题库也可以单独导出成 CSV，用 Excel 打开就能看和改。）
         </p>
         <div className="btn-row">
           <Button loading={busy === 'export'} onClick={exportBackup}>
@@ -381,6 +407,9 @@ export function SettingsPage() {
               }}
             />
           </label>
+          <Button variant="ghost" loading={busy === 'bank'} onClick={exportBank}>
+            导出题库（CSV）
+          </Button>
         </div>
       </Card>
 
