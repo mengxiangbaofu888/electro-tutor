@@ -1,0 +1,46 @@
+{
+  "name": "electro-tutor",
+  "version": "0.1.0",
+  "description": "电工陪练 · 电工/PLC 学习 AI 陪练：导入材料自动出大纲、出题组卷、批改评分，并针对薄弱点自进化",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "author": "electro-tutor contributors",
+  "keywords": [
+    "电工",
+    "PLC",
+    "AI",
+    "教育",
+    "刷题",
+    "大模型",
+    "PWA"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run typecheck && vite build",
+    "build:fast": "vite build",
+    "build:single": "vite build --config vite.single.config.ts && node scripts/build-single.mjs",
+    "serve": "node scripts/serve-dist.mjs",
+    "preview": "vite preview --host",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.node.json",
+    "icons": "node scripts/gen-icons.mjs"
+  },
+  "dependencies": {
+    "dexie": "^4.4.6",
+    "jszip": "^3.10.2",
+    "mammoth": "^1.13.0",
+    "pdfjs-dist": "^6.4.299",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "react-router-dom": "^7.18.4",
+    "zustand": "^5.0.15"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.2",
+    "vite-plugin-pwa": "^2.0.0"
+  }
+}
