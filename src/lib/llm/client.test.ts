@@ -352,6 +352,49 @@ describe('偶发连接中断要自动重试一次', () => {
   });
 });
 
+describe('JSON Output 的概率性空回复（DeepSeek 官方文档自己承认的）', () => {
+  it('对 DeepSeek 干脆不发 response_format（提示词里已经要求只输出 JSON）', async () => {
+    handler = respondOk;
+    await chat(cfg({ model: 'deepseek-flash' }), userMsg, { jsonMode: true });
+    const body = JSON.parse(received[0].body) as Record<string, unknown>;
+    expect(body.response_format).toBeUndefined();
+  });
+
+  it('其它服务商照发（能用就用，解析更稳）', async () => {
+    handler = respondOk;
+    await chat(cfg({ model: 'gpt-4o-mini' }), userMsg, { jsonMode: true });
+    expect(JSON.parse(received[0].body).response_format).toEqual({ type: 'json_object' });
+  });
+
+  it('带了 response_format 却回空内容 → 自动去掉它重试一次，用户照样拿到结果', async () => {
+    let calls = 0;
+    const sawFormat: boolean[] = [];
+    handler = (_req, res, body) => {
+      calls += 1;
+      sawFormat.push(Boolean((JSON.parse(body) as { response_format?: unknown }).response_format));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          choices: [{ message: { content: calls === 1 ? '' : '{"questions":[]}' } }],
+        }),
+      );
+    };
+    const out = await chat(cfg({ model: 'gpt-4o-mini' }), userMsg, { jsonMode: true });
+    expect(out.content).toBe('{"questions":[]}');
+    expect(sawFormat).toEqual([true, false]);
+  });
+
+  it('去掉 response_format 重试后还是空 → 仍然如实报错（不能假装成功）', async () => {
+    handler = (_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: '' } }] }));
+    };
+    await expect(chat(cfg({ model: 'gpt-4o-mini' }), userMsg, { jsonMode: true })).rejects.toThrow(
+      /空内容/,
+    );
+  });
+});
+
 /* ============================== 请求拼装 ============================== */
 
 describe('请求拼装', () => {

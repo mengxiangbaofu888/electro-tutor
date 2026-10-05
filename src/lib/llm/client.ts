@@ -208,6 +208,24 @@ export function thinkingOffParam(config: LLMConfig): Record<string, unknown> | n
   return null;
 }
 
+/**
+ * 要不要给这家服务商发 `response_format`。
+ *
+ * **DeepSeek 不发**：官方文档《JSON Output》注意事项第 4 条明确写着
+ *   "在使用 JSON Output 功能时，API 有概率会返回空的 content。
+ *    我们正在积极优化该问题，您可以尝试修改 prompt 以缓解此类问题。"
+ * 用户实测完全对得上：纯文本（测试连接）正常，一出题（要 JSON）就 4 批全空。
+ *
+ * 我们的提示词里本来就写死了"只输出一个 JSON 对象、不要解释文字、
+ * 不要代码围栏"，解析器也能容忍代码围栏和多余文字 —— 所以**不依赖这个参数更稳**。
+ */
+export function shouldSendResponseFormat(config: LLMConfig): boolean {
+  const host = hostOf(config.baseUrl).toLowerCase();
+  const model = config.model.trim().toLowerCase();
+  const isDeepSeek = host.includes('deepseek.com') || /^deepseek/.test(model);
+  return !isDeepSeek;
+}
+
 function buildBody(config: LLMConfig, messages: ChatMessage[], opts: ChatOptions, stream: boolean) {
   const body: Record<string, unknown> = {
     model: config.model.trim(),
@@ -231,8 +249,11 @@ function buildBody(config: LLMConfig, messages: ChatMessage[], opts: ChatOptions
   if (!thinkingDisabled) body.temperature = opts.temperature ?? config.temperature ?? 0.6;
 
   if (opts.maxTokens) body.max_tokens = opts.maxTokens;
-  // 不是所有服务商都支持 response_format，失败时由调用方降级重试
-  if (opts.jsonMode && !stream) body.response_format = { type: 'json_object' };
+  // 不是所有服务商都支持 response_format，失败时由调用方降级重试；
+  // DeepSeek 干脆不发（它的 JSON Output 有概率返回空 content，官方文档承认）
+  if (opts.jsonMode && !stream && shouldSendResponseFormat(config)) {
+    body.response_format = { type: 'json_object' };
+  }
   return body;
 }
 
@@ -295,6 +316,8 @@ export async function chat(
   const payload = buildBody(config, messages, opts, streaming);
 
   const idleMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+  /** 这次请求是否带上了 response_format（空回复时要用"去掉它"再试一次） */
+  const sentResponseFormat = Boolean(opts.jsonMode && !streaming && shouldSendResponseFormat(config));
   /** 出错时用这个把"哪家、哪个模型"说清楚，不然用户只能干瞪眼 */
   const where = `${config.model || '(未填模型)'} @ ${hostOf(config.baseUrl)}`;
 
@@ -326,9 +349,27 @@ export async function chat(
       throw new Error(describeHttpError(res.status, JSON.stringify(res.data ?? '')));
     }
     const text = extractContent(res.data);
-    if (!text.trim()) throw emptyReplyError(config, extractReasoning(res.data), opts);
     if (opts.onDelta && text) opts.onDelta(text);
-    return { content: text };
+    if (text.trim()) return { content: text };
+    // 空回复 + 我们发过 response_format → 去掉它再试一次
+    if (sentResponseFormat) {
+      const retry = await native.request({
+        url,
+        method: 'POST',
+        headers,
+        data: buildBody(config, messages, { ...opts, jsonMode: false }, false),
+        readTimeout: idleMs + 30_000,
+        connectTimeout: 20_000,
+      });
+      if (retry.status >= 200 && retry.status < 300) {
+        const retryText = extractContent(retry.data);
+        if (retryText.trim()) {
+          if (opts.onDelta && retryText) opts.onDelta(retryText);
+          return { content: retryText };
+        }
+      }
+    }
+    throw emptyReplyError(config, extractReasoning(res.data), opts);
   }
 
   // 浏览器通路：自己实现空闲超时（以前这里完全没有超时，卡住就是永远卡住）
@@ -441,6 +482,21 @@ export async function chat(
 
   // HTTP 200 但没有正文**不是成功**。空回复曾经被当成"连接成功"报给用户，
   // 结果他真去出题时全是"模型没有返回合法 JSON"——必须在这里拦住。
+  if (!result.content.trim() && sentResponseFormat && !streaming) {
+    // 去掉 response_format 再试一次：DeepSeek 的 JSON Output 会概率性返回空内容
+    // （官方文档已承认）。提示词里本来就要求只输出 JSON，去掉它通常就好了。
+    try {
+      const retryRes = await doFetch(buildBody(config, messages, { ...opts, jsonMode: false }, false));
+      if (retryRes.ok) {
+        const retryOut = finalize(await retryRes.json(), opts);
+        if (retryOut.content.trim()) result = retryOut;
+      }
+    } catch {
+      // 重试也失败就按空回复报错，错误信息里有排查指引
+    } finally {
+      clear();
+    }
+  }
   if (!result.content.trim()) {
     throw emptyReplyError(config, result.reasoning ?? '', opts);
   }
