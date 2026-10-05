@@ -28,8 +28,7 @@ export interface ScanCode {
 }
 
 /** 支持的码制：二维码 + 书背常见的几种一维条码 */
-const FORMATS = [
-  BarcodeFormat.QR_CODE,
+const FORMATS = [  BarcodeFormat.QR_CODE,
   BarcodeFormat.DATA_MATRIX,
   BarcodeFormat.EAN_13,
   BarcodeFormat.EAN_8,
@@ -40,6 +39,14 @@ const FORMATS = [
   BarcodeFormat.ITF,
   BarcodeFormat.CODABAR,
 ];
+
+/**
+ * 默认时间预算（毫秒）。
+ * 实测：拍整张封底、码只占很小一块时，要 **7.1 秒**才能找到第一个二维码；
+ * 而拍近的码只要几十到几百毫秒。所以上限给 8 秒——宁可等一会儿，
+ * 也不要把本来能解出来的照片判成失败。
+ */
+export const DEFAULT_TIME_BUDGET_MS = 8000;
 
 /* ============================== 纯计算部分（可单测） ============================== */
 
@@ -197,29 +204,38 @@ export function decodeLuminance(
   luminance: Uint8ClampedArray,
   width: number,
   height: number,
-  options: { timeBudgetMs?: number } = {},
+  options: { timeBudgetMs?: number; onPhase?: (phase: 'full' | 'tiles') => void } = {},
 ): ScanCode | null {
   if (width <= 0 || height <= 0 || luminance.length < width * height) return null;
 
-  const budget = options.timeBudgetMs ?? 3500;
+  // 默认 8 秒：实测"整张封底找小二维码"要 7.1 秒才能找到（大图 + 切块 + 放大），
+  // 预算给小了会把**本来能解出来的**照片判成失败。码拍得近时只要几十毫秒，
+  // 所以正常用法根本等不到这个上限。
+  const budget = options.timeBudgetMs ?? DEFAULT_TIME_BUDGET_MS;
   const started = Date.now();
   const outOfTime = () => Date.now() - started > budget;
 
-  // ① 整张（二维码可能拍得很大，这一层最快命中）
+  // ① 整张（二维码拍得大时这一层立刻命中，通常几十毫秒）
   const full = tryAllVariants(luminance, width, height);
   if (full) return full;
+
+  // 整张没找到 → 告诉界面"正在切块细找"，别让用户对着转圈发呆
+  options.onPhase?.('tiles');
 
   // ②③ 分块 + 放大
   for (const grid of [2, 3]) {
     for (const tile of tileRanges(width, height, grid)) {
       if (outOfTime()) return null;
       const crop = cropLuminance(luminance, width, height, tile);
-      const hit = tryPlainVariants(crop, tile.width, tile.height);
+      const hit = tryPlainVariants(crop, tile.width, tile.height, outOfTime);
       if (hit) return hit;
 
+      // 放大这一步**不能省**：实测用户拍的那张封底照片，
+      // 三个小二维码只有靠"分块 + 放大"才解得出来，只分块不放大是解不出的。
+      // 慢的问题交给时间预算兜（每次尝试前都查一次表）。
       if (outOfTime()) return null;
       const up = scaleUpLuminance(crop, tile.width, tile.height, 2);
-      const hit2 = tryPlainVariants(up.lum, up.width, up.height);
+      const hit2 = tryPlainVariants(up.lum, up.width, up.height, outOfTime);
       if (hit2) return hit2;
     }
   }
@@ -250,13 +266,15 @@ function tryAllVariants(
   return null;
 }
 
-/** 两种拍法：正相 + 反相（分块阶段用这套，省一半时间） */
+/** 两种拍法：正相 + 反相（分块阶段用这套，省一半时间）；每次尝试前查一次时间预算 */
 function tryPlainVariants(
   luminance: Uint8ClampedArray,
   width: number,
   height: number,
+  outOfTime?: () => boolean,
 ): ScanCode | null {
   for (const lum of [luminance, invertLuminance(luminance)]) {
+    if (outOfTime?.()) return null;
     try {
       const hit = tryDecodeOnce(lum, width, height);
       if (hit) return hit;
@@ -344,7 +362,10 @@ function fileToDataUrl(file: Blob): Promise<string> {
 }
 
 /** 解一张 dataURL 图片（App 里照片压缩后就是这个格式） */
-export async function decodeDataUrl(dataUrl: string): Promise<ScanCode | null> {
+export async function decodeDataUrl(
+  dataUrl: string,
+  onPhase?: (phase: 'full' | 'tiles') => void,
+): Promise<ScanCode | null> {
   const img = await loadImage(dataUrl);
   const width = img.naturalWidth || img.width;
   const height = img.naturalHeight || img.height;
@@ -355,10 +376,14 @@ export async function decodeDataUrl(dataUrl: string): Promise<ScanCode | null> {
   const ctx = canvas.getContext('2d');
   if (!ctx) return null;
   ctx.drawImage(img, 0, 0);
-  return decodeImageData(ctx.getImageData(0, 0, width, height));
+  const pixels = ctx.getImageData(0, 0, width, height);
+  return decodeLuminance(rgbaToLuminance(pixels.data, width, height), width, height, { onPhase });
 }
 
-/** 解一个图片文件（用户拍的或选的） */
-export async function decodeImageFile(file: Blob): Promise<ScanCode | null> {
-  return decodeDataUrl(await fileToDataUrl(file));
+/** 解一个图片文件（用户拍的或选的）；onPhase 用来告诉界面"正在切块细找" */
+export async function decodeImageFile(
+  file: Blob,
+  onPhase?: (phase: 'full' | 'tiles') => void,
+): Promise<ScanCode | null> {
+  return decodeDataUrl(await fileToDataUrl(file), onPhase);
 }

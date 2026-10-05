@@ -113,7 +113,15 @@ export function BookAddPage() {
         setProgress(`正在解码第 ${i + 1} / ${list.length} 张…`);
         let hit = null;
         try {
-          hit = await decodeImageFile(list[i]);
+          // 整张找不到时，解码器会回调把阶段切到"切块细找"——
+          // 这一步可能要几秒（实测拍整张封底要 7 秒），必须让用户知道它在干活。
+          hit = await decodeImageFile(list[i], (phase) => {
+            if (phase === 'tiles') {
+              setProgress(
+                `第 ${i + 1} / ${list.length} 张：整张没找到，正在切块放大细找（最多几秒）…`,
+              );
+            }
+          });
         } catch {
           failed += 1;
           continue;

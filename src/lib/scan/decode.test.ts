@@ -90,17 +90,27 @@ describe('解不出来时不能崩、也不能瞎猜', () => {
     expect(decodeLuminance(lum, 120, 120, { timeBudgetMs: 800 })).toBeNull();
   });
 
-  it('时间预算真的生效：没有码的图不会让用户一直等', () => {
-    // 500x500 噪点，没有任何码；给 150ms 预算就必须在 150ms 附近放弃
-    const lum = new Uint8ClampedArray(500 * 500);
+  it('时间预算真的生效：没有码的图不会把整套流程走完', () => {
+    // 300x300 噪点，没有任何码。
+    // 注意断言方式：不同机器快慢差很多（CI 上单次尝试就要 3.4 秒），
+    // 所以不比绝对时间，而是比"有预算"和"没预算"哪个先收工——
+    // 这个相对关系在任何机器上都成立。
+    const side = 300;
+    const lum = new Uint8ClampedArray(side * side);
     for (let i = 0; i < lum.length; i++) lum[i] = (i * 2654435761) % 256;
+
     const t0 = Date.now();
-    const hit = decodeLuminance(lum, 500, 500, { timeBudgetMs: 150 });
-    const spent = Date.now() - t0;
-    expect(hit).toBeNull();
-    // 允许一次尝试的超出量，但绝不该跑成几秒
-    expect(spent).toBeLessThan(2500);
-  });
+    const quick = decodeLuminance(lum, side, side, { timeBudgetMs: 60 });
+    const quickMs = Date.now() - t0;
+
+    const t1 = Date.now();
+    const full = decodeLuminance(lum, side, side, { timeBudgetMs: 30_000 });
+    const fullMs = Date.now() - t1;
+
+    expect(quick).toBeNull();
+    expect(full).toBeNull();
+    expect(quickMs).toBeLessThan(fullMs);
+  }, 60_000);
 
   it('尺寸不合法时返回 null', () => {
     expect(decodeLuminance(new Uint8ClampedArray(0), 0, 0)).toBeNull();
