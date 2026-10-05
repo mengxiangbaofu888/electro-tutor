@@ -9,7 +9,7 @@
  * 题型配比按比例缩到每批的题量（之和必须正好等于那一批的题量）。
  */
 import { describe, expect, it } from 'vitest';
-import { QUESTION_BATCH_SIZE, scaleTypeMix, splitAllocation } from './quiz';
+import { QUESTION_BATCH_SIZE, describeBatchFailures, scaleTypeMix, splitAllocation } from './quiz';
 
 const p = (pointId: string, count: number) => ({ pointId, count });
 
@@ -57,6 +57,30 @@ describe('把"知识点→题量"拆成一批批', () => {
   it('默认批量是 5（一次要 20 道会被拆成 4 批）', () => {
     expect(QUESTION_BATCH_SIZE).toBe(5);
     expect(splitAllocation([p('a', 20)], QUESTION_BATCH_SIZE)).toHaveLength(4);
+  });
+});
+
+describe('把"哪几批失败了"说成人话', () => {
+  it('4 批同一个原因 → 合并成一句，不再把同一句话重复 4 遍', () => {
+    const msg = describeBatchFailures([
+      '第 1 批：模型返回了空内容（一个字都没有）',
+      '第 2 批：模型返回了空内容（一个字都没有）',
+      '第 3 批：模型返回了空内容（一个字都没有）',
+      '第 4 批：模型返回了空内容（一个字都没有）',
+    ]);
+    expect(msg).toBe('4 批都没能出题，原因是同一个：模型返回了空内容（一个字都没有）');
+    expect(msg.match(/空内容/g)).toHaveLength(1);
+  });
+
+  it('原因不同就逐条列出', () => {
+    const msg = describeBatchFailures(['第 1 批：上游 502', '第 2 批：模型没给出题目']);
+    expect(msg).toContain('有 2 批没能出题');
+    expect(msg).toContain('上游 502');
+    expect(msg).toContain('模型没给出题目');
+  });
+
+  it('只有一批时照实说', () => {
+    expect(describeBatchFailures(['第 3 批：上游 502'])).toBe('有 1 批没能出题（第 3 批：上游 502）');
   });
 });
 

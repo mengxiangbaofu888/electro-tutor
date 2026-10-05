@@ -305,7 +305,7 @@ export async function generateQuestions(
     );
   }
   if (batchFailures.length) {
-    notes.push(`有 ${batchFailures.length} 批没能出题（${batchFailures.join('；')}）`);
+    notes.push(describeBatchFailures(batchFailures));
   }
   if (notes.length) onWarning?.(`${notes.join('；')}。`);
 
@@ -317,6 +317,23 @@ export async function generateQuestions(
 
   await db.questions.bulkPut(questions);
   return questions;
+}
+
+/**
+ * 把"哪几批失败了"说成人话。
+ *
+ * 真实反馈：用户看到的是 4 批失败、每条原因一字不差地重复 4 遍
+ * （"第 1 批：…；第 2 批：…；第 3 批：…；第 4 批：…"），
+ * 一屏红字看着就像程序坏了，而其实原因只有一个。
+ * 同一个原因就合并成一句，并说清"是哪几批"。
+ */
+export function describeBatchFailures(failures: string[]): string {
+  const reasons = failures.map((f) => f.replace(/^第\s*\d+\s*批[：:]\s*/, '').trim());
+  const unique = [...new Set(reasons)];
+  if (failures.length > 1 && unique.length === 1) {
+    return `${failures.length} 批都没能出题，原因是同一个：${unique[0]}`;
+  }
+  return `有 ${unique.length} 批没能出题（${failures.join('；')}）`;
 }
 
 /**
