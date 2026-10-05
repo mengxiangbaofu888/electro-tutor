@@ -20,6 +20,7 @@
     "build": "npm run typecheck && vite build",
     "build:fast": "vite build",
     "build:single": "vite build --config vite.single.config.ts && node scripts/build-single.mjs",
+    "build:preview": "node scripts/build-preview.mjs",
     "serve": "node scripts/serve-dist.mjs",
     "cap:sync": "npm run build:fast && cap sync android",
     "apk": "node scripts/build-apk.mjs",

@@ -218,11 +218,13 @@ electro-tutor/
 ├─ public/                      # 图标等静态资源
 ├─ scripts/
 │  ├─ lib/png.mjs               # 零依赖 PNG 生成与绘图（zlib 手写 PNG）
+│  ├─ lib/inline.mjs            # 把构建产物合并成单文件 HTML（单文件版与预览版共用）
 │  ├─ gen-icons.mjs             # 生成 PWA 图标
 │  ├─ gen-android-assets.mjs    # 生成安卓图标与启动页（替换 Capacitor 默认素材）
 │  ├─ setup-android-toolchain.mjs # 一键装 JDK 21 + Android SDK 到 .android-tools/
 │  ├─ build-apk.mjs             # 一键出 APK（跨平台）
 │  ├─ build-single.mjs          # 打包成单文件离线 HTML
+│  ├─ build-preview.mjs         # 生成可离线打开的 UI 预览（用于视觉检查）
 │  ├─ publish-github.mjs        # 一条命令发布到 GitHub（建仓 + 推送 + 标签）
 │  └─ serve-dist.mjs            # 预览 dist/ 的极简静态服务器
 ├─ android/                     # Capacitor 生成的安卓工程
@@ -280,6 +282,17 @@ npm run test:watch  # 监听模式
 | `src/docs-consistency.test.ts` | **文档不会腐烂**：README/docs 里提到的 npm 脚本、相对链接、源码路径都真实存在；知识点数量与内置数据一致；测试文件表与磁盘上的文件一一对应 |
 
 当前状态：**213 个用例全部通过**（16 个测试文件）。
+
+### 想看界面长什么样
+
+单元测试只能证明"DOM 里有没有某个元素"，证明不了"它看起来对不对"。需要亲眼看的时候：
+
+```bash
+npm run build:preview    # 产出 dist-preview/preview-*.html（8 个页面，双击即可打开）
+```
+
+它内联了内存版 IndexedDB 和一批示例数据，所以**不需要服务器、不经过网络代理**也能渲染。
+正式构建完全不受影响（示例数据不进 App）。详见 [`docs/03-开发与部署步骤.md`](docs/03-开发与部署步骤.md)。
 
 ---
 

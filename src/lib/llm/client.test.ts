@@ -26,11 +26,21 @@ type Handler = (
   body: string,
 ) => void;
 
+/** 默认替身：返回一段正常的对话响应 */
+const respondOk: Handler = (_req, res) => {
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ choices: [{ message: { content: '默认应答' } }] }));
+};
+
 let server: Server;
 let port = 0;
-let handler: Handler;
-/** 记录每次请求，方便断言发出去的到底是什么 */
-let received: { url: string; method: string; auth: string; body: string }[];
+let handler: Handler = respondOk;
+/**
+ * 记录每次请求，方便断言发出去的到底是什么。
+ * 必须在声明处就初始化：beforeAll 里的自检探针也会走到服务器的记录逻辑，
+ * 那时代码还没进 beforeEach，若是 undefined 就会在处理器里抛异常、导致请求永不响应。
+ */
+let received: { url: string; method: string; auth: string; body: string }[] = [];
 
 beforeAll(async () => {
   server = createServer((req, res) => {
@@ -50,6 +60,23 @@ beforeAll(async () => {
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   port = (server.address() as AddressInfo).port;
+
+  // 自检：确认本机回环这次真的通。
+  // 并行跑多个测试文件时，"回环暂时不可用"偶发出现过一次——
+  // 那种情况下 17 个依赖网络的用例会一起抛断言失败，很难看出真正的原因。
+  // 这里主动探一次，把它变成一句能直接照做的错误。
+  try {
+    const probe = await fetch(`http://127.0.0.1:${port}/__probe__`, { signal: AbortSignal.timeout(5000) });
+    if (!probe.ok) throw new Error(`HTTP ${probe.status}`);
+    await probe.json();
+  } catch (e) {
+    throw new Error(
+      `本机回环（127.0.0.1:${port}）在这次运行中不可用，无法测试 HTTP 层：` +
+        `${e instanceof Error ? e.message : String(e)}。\n` +
+        '这属于测试环境问题（并行运行较多测试文件时偶发），不是产品缺陷。\n' +
+        '单独重跑即可：npx vitest run src/lib/llm/client.test.ts',
+    );
+  }
 });
 
 afterAll(async () => {
@@ -58,10 +85,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   received = [];
-  handler = (_req, res) => {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ choices: [{ message: { content: '默认应答' } }] }));
-  };
+  handler = respondOk;
 });
 
 function cfg(patch: Partial<LLMConfig> = {}): LLMConfig {
