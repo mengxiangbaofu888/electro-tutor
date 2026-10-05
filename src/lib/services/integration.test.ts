@@ -734,6 +734,107 @@ describe('边界与容错', () => {
     await expect(generateOutline({ materialIds: [materialId], track: 'plc' })).rejects.toThrow(/缺少名称/);
   });
 
+  it('要 8 道题会分两批去要（每批 5 道以内），并且两边都入库', async () => {
+    const materialId = newId();
+    await db.materials.put({
+      id: materialId,
+      title: '材料',
+      sourceType: 'text',
+      content: MATERIAL_TEXT,
+      charCount: MATERIAL_TEXT.length,
+      createdAt: Date.now(),
+    });
+    const { points, outline } = await generateOutline({ materialIds: [materialId], track: 'plc' });
+
+    // 每批按"这一批要几道"给题：第 1 批 5 道、第 2 批 3 道。
+    // 题量在提示词里是这么写的：「- 知识点名 —— 需要出 5 道」（见 prompts.ts）。
+    chatMock.mockClear();
+    chatMock.mockImplementation(
+      async (_c: unknown, _m: unknown, opts?: { onDelta?: (d: string) => void }) => {
+        const joined = (Array.isArray(_m) ? _m : [])
+          .map((x) => String((x as { content?: unknown })?.content ?? ''))
+          .join('\n');
+        const asked = Number(/需要出\s*(\d+)\s*道/.exec(joined)?.[1] ?? '1');
+        const list = Array.from({ length: asked }, (_, i) => ({
+          type: 'judge',
+          stem: `第 ${i + 1} 道判断题（批次题量 ${asked}）`,
+          answer: '正确',
+          knowledgePointNames: [points[0].name],
+          explanation: '',
+          difficulty: 2,
+        }));
+        const text = JSON.stringify(list);
+        opts?.onDelta?.(text);
+        return { content: text };
+      },
+    );
+
+    const batches: string[] = [];
+    const questions = await generateQuestions({
+      outlineId: outline.id,
+      track: 'plc',
+      allocation: [{ pointId: points[0].id, count: 8 }],
+      typeMix: [{ type: 'judge', count: 8 }],
+      difficultyMix: '标准',
+      onBatch: ({ done, total, batchIndex, batchCount }) =>
+        batches.push(`${batchIndex}/${batchCount} 已出 ${done}/${total}`),
+    });
+
+    expect(chatMock).toHaveBeenCalledTimes(2); // 8 道 → 5 + 3，两批
+    expect(questions).toHaveLength(8);
+    expect(await db.questions.count()).toBe(8);
+    expect(batches[0]).toContain('1/2');
+    expect(batches.at(-1)).toContain('2/2');
+  });
+
+  it('某一批失败不会毁掉整次出题：已出的题照样留下，并说明哪批没成', async () => {
+    const materialId = newId();
+    await db.materials.put({
+      id: materialId,
+      title: '材料',
+      sourceType: 'text',
+      content: MATERIAL_TEXT,
+      charCount: MATERIAL_TEXT.length,
+      createdAt: Date.now(),
+    });
+    const { points, outline } = await generateOutline({ materialIds: [materialId], track: 'plc' });
+
+    let call = 0;
+    chatMock.mockClear();
+    chatMock.mockImplementation(
+      async (_c: unknown, _m: unknown, opts?: { onDelta?: (d: string) => void }) => {
+        call += 1;
+        if (call === 1) throw new Error('上游 502');
+        const text = JSON.stringify([
+          {
+            type: 'judge',
+            stem: '第二批出的题',
+            answer: '正确',
+            knowledgePointNames: [points[0].name],
+            explanation: '',
+            difficulty: 2,
+          },
+        ]);
+        opts?.onDelta?.(text);
+        return { content: text };
+      },
+    );
+
+    const warnings: string[] = [];
+    const questions = await generateQuestions({
+      outlineId: outline.id,
+      track: 'plc',
+      allocation: [{ pointId: points[0].id, count: 6 }],
+      typeMix: [{ type: 'judge', count: 6 }],
+      difficultyMix: '标准',
+      onWarning: (t) => warnings.push(t),
+    });
+
+    expect(questions).toHaveLength(1); // 第二批的那道题没被丢掉
+    expect(warnings.join()).toContain('1 批没能出题');
+    expect(warnings.join()).toContain('上游 502');
+  });
+
   it('模型虚构了不存在的知识点名称时，题目仍然入库（只是关联为空）', async () => {
     const materialId = newId();
     await db.materials.put({

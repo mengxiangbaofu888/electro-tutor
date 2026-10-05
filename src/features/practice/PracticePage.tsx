@@ -136,6 +136,9 @@ export function PracticePage() {
     try {
       const diffText = DIFFICULTY_OPTIONS.find((d) => d.value === difficulty)?.label ?? '标准';
       let warning = '';
+      // 分批出题：每出一批就把"已出几道 / 共几道"显示出来，
+      // 别让用户对着转圈等 20 道题一次吐完（实测这就是"半天出不来"的来源）。
+      let batchNote = '';
       const questions = await generateQuestions({
         outlineId,
         track,
@@ -144,6 +147,10 @@ export function PracticePage() {
         difficultyMix: `${diffText}${instruction.trim() ? `；额外要求：${instruction.trim()}` : ''}`,
         withMaterial,
         onProgress: (d) => setStream((prev) => (prev + d).slice(-3000)),
+        onBatch: ({ done, total, batchIndex, batchCount }) => {
+          batchNote = `正在出题：已出 ${done} / ${total} 道（第 ${batchIndex} / ${batchCount} 批）…`;
+          setMessage({ tone: 'ok', text: batchNote });
+        },
         onWarning: (text) => {
           warning = text;
         },

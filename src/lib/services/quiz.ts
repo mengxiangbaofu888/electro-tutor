@@ -24,6 +24,11 @@ export interface GenerateQuestionsParams {
   /** 是否把材料原文片段一起给模型参考 */
   withMaterial?: boolean;
   onProgress?: (delta: string) => void;
+  /**
+   * 分批进度：出了几道 / 共几道、正在第几批。
+   * 用户要的是"看得见的进度"——一次要 20 道题等半天，是最容易被骂的体验。
+   */
+  onBatch?: (info: { done: number; total: number; batchIndex: number; batchCount: number }) => void;
   /** 非致命问题的提示（例如有题目格式不完整被跳过） */
   onWarning?: (text: string) => void;
 }
@@ -175,10 +180,30 @@ export function isAnswerable(q: {
  * 调大模型生成题目并入库。
  * 会按题型分批请求，避免一次要太多题导致模型偷懒或截断。
  */
+/**
+ * 单次请求最多要几道题。
+ *
+ * 为什么分批：用户实测"要 20 道题，半天出不来"。一次要 20 道，
+ * 模型要一口气吐出很大的 JSON，既慢、又更容易被 max_tokens 截断；
+ * 中间还看不到任何进度，只能干等。
+ * 改成每批 5 道：每批都快，而且**出一道就能先看到一道**。
+ */
+export const QUESTION_BATCH_SIZE = 5;
+
 export async function generateQuestions(
   params: GenerateQuestionsParams,
 ): Promise<Question[]> {
-  const { outlineId, track, allocation, typeMix, difficultyMix, withMaterial, onProgress, onWarning } = params;
+  const {
+    outlineId,
+    track,
+    allocation,
+    typeMix,
+    difficultyMix,
+    withMaterial,
+    onProgress,
+    onBatch,
+    onWarning,
+  } = params;
 
   const config = await getDefaultLLM('text');
   if (!config) throw new Error('还没有配置文本大模型，请先到「我的 → 模型配置」里添加。');
@@ -188,11 +213,6 @@ export async function generateQuestions(
 
   const allPoints = await getOutlinePoints(outlineId);
   const pointById = new Map(allPoints.map((p) => [p.id, p]));
-
-  const kpPayload = wanted.map((a) => {
-    const p = pointById.get(a.pointId);
-    return { name: p?.name ?? '未命名知识点', summary: p?.summary, targetCount: a.count };
-  });
 
   const profile = await getProfile();
 
@@ -210,32 +230,173 @@ export async function generateQuestions(
     }
   }
 
-  const messages = buildQuestionMessages({
-    track,
-    knowledgePoints: kpPayload,
-    typeMix,
-    difficultyMix,
-    materialExcerpt: excerpt,
-    profile,
-  });
-
-  let raw = '';
-  const result = await chat(config, messages, {
-    jsonMode: true,
-    temperature: 0.7,
-    maxTokens: 8192,
-    onDelta: (delta) => {
-      raw += delta;
-      onProgress?.(delta);
-    },
-  });
-  const text = result.content || raw;
-
-  const drafts = parseArrayLoose<QuestionDraft>(text, '题目');
-  if (!drafts.length) throw new Error('模型没有生成任何题目，请调整知识点或稍后重试。');
-
+  const totalWanted = wanted.reduce((sum, a) => sum + a.count, 0);
+  const batches = splitAllocation(wanted, QUESTION_BATCH_SIZE);
   const questions: Question[] = [];
   const skippedReasons: string[] = [];
+  const batchFailures: string[] = [];
+
+  for (let i = 0; i < batches.length; i++) {
+    const batch = batches[i];
+    const batchCount = batch.reduce((sum, a) => sum + a.count, 0);
+
+    onBatch?.({
+      done: questions.length,
+      total: totalWanted,
+      batchIndex: i + 1,
+      batchCount: batches.length,
+    });
+
+    const messages = buildQuestionMessages({
+      track,
+      knowledgePoints: batch.map((a) => {
+        const p = pointById.get(a.pointId);
+        return { name: p?.name ?? '未命名知识点', summary: p?.summary, targetCount: a.count };
+      }),
+      typeMix: scaleTypeMix(typeMix, batchCount),
+      difficultyMix,
+      materialExcerpt: excerpt,
+      profile,
+    });
+
+    let raw = '';
+    let drafts: QuestionDraft[] = [];
+    try {
+      const result = await chat(config, messages, {
+        jsonMode: true,
+        temperature: 0.7,
+        // 每批只要几道题，输出上限按批量缩放：给太多反而让模型话多、更慢
+        maxTokens: Math.min(8192, 800 + batchCount * 400),
+        onDelta: (delta) => {
+          raw += delta;
+          onProgress?.(delta);
+        },
+      });
+      const text = result.content || raw;
+      drafts = parseArrayLoose<QuestionDraft>(text, '题目');
+    } catch (e) {
+      // 单批失败不把整次尝试毁掉：已经出的题照样留给用户，最后再汇总说明
+      batchFailures.push(`第 ${i + 1} 批：${e instanceof Error ? e.message : String(e)}`);
+      continue;
+    }
+    if (!drafts.length) {
+      batchFailures.push(`第 ${i + 1} 批模型没给出题目`);
+      continue;
+    }
+    collectDrafts(drafts, { outlineId, allPoints, questions, skippedReasons });
+    onBatch?.({
+      done: questions.length,
+      total: totalWanted,
+      batchIndex: i + 1,
+      batchCount: batches.length,
+    });
+  }
+
+  // 出了什么问题都要说出来。静默丢弃会让用户以为"模型只出了这么几道"。
+  // 分两类说：**题目本身不合格**（跳过了几道）和**整批失败**（哪几批没成），
+  // 混成一句"N 处"反而让人看不懂到底是题的问题还是接口的问题。
+  const notes: string[] = [];
+  if (skippedReasons.length) {
+    notes.push(
+      `有 ${skippedReasons.length} 道题格式不完整，已跳过（${[...new Set(skippedReasons)].join('；')}）`,
+    );
+  }
+  if (batchFailures.length) {
+    notes.push(`有 ${batchFailures.length} 批没能出题（${batchFailures.join('；')}）`);
+  }
+  if (notes.length) onWarning?.(`${notes.join('；')}。`);
+
+  if (!questions.length) {
+    throw new Error(
+      `这批题一道都没成（${[...new Set([...skippedReasons, ...batchFailures])].join('；') || '模型没有返回可用内容'}），请重试或换个模型。`,
+    );
+  }
+
+  await db.questions.bulkPut(questions);
+  return questions;
+}
+
+/**
+ * 把"知识点 → 题量"拆成一批批，每批总量不超过 maxPerBatch。
+ * 单个知识点要得比一批还多时，会拆到多批里。
+ */
+export function splitAllocation(
+  allocation: { pointId: ID; count: number }[],
+  maxPerBatch: number,
+): { pointId: ID; count: number }[][] {
+  const limit = Math.max(1, maxPerBatch);
+  const batches: { pointId: ID; count: number }[][] = [];
+  let current: { pointId: ID; count: number }[] = [];
+  let currentCount = 0;
+  const flush = () => {
+    if (current.length) batches.push(current);
+    current = [];
+    currentCount = 0;
+  };
+
+  for (const a of allocation) {
+    let left = Math.max(0, Math.floor(a.count));
+    while (left > 0) {
+      const room = limit - currentCount;
+      if (room <= 0) {
+        flush();
+        continue;
+      }
+      const take = Math.min(room, left);
+      current.push({ pointId: a.pointId, count: take });
+      currentCount += take;
+      left -= take;
+      if (currentCount >= limit) flush();
+    }
+  }
+  flush();
+  return batches;
+}
+
+/**
+ * 把整套题型配比按比例缩到"这一批要几道"。
+ * 按最大余数法分配，保证各题型数量之和**正好等于**这一批的题量。
+ */
+export function scaleTypeMix(
+  mix: { type: QuestionType; count: number }[],
+  count: number,
+): { type: QuestionType; count: number }[] {
+  const usable = mix.filter((m) => m.count > 0);
+  const totalMix = usable.reduce((sum, m) => sum + m.count, 0);
+  if (!usable.length || totalMix <= 0 || count <= 0) return usable;
+
+  const scaled = usable.map((m) => {
+    const exact = (m.count / totalMix) * count;
+    const base = Math.floor(exact);
+    return { type: m.type, count: base, rem: exact - base };
+  });
+
+  let left = count - scaled.reduce((sum, s) => sum + s.count, 0);
+  const order = [...scaled].sort((a, b) => b.rem - a.rem);
+  for (let i = 0; left > 0 && order.length; i = (i + 1) % order.length) {
+    order[i].count += 1;
+    left -= 1;
+  }
+
+  return scaled
+    .filter((s) => s.count > 0)
+    .map((s) => ({ type: s.type, count: s.count }));
+}
+
+/**
+ * 把一批草稿变成可入库的题目：逐题校验，不合格的记下原因。
+ * 抽成函数是因为现在**分批出题**，每批都要走一遍同样的校验。
+ */
+function collectDrafts(
+  drafts: QuestionDraft[],
+  ctx: {
+    outlineId: ID;
+    allPoints: KnowledgePoint[];
+    questions: Question[];
+    skippedReasons: string[];
+  },
+): void {
+  const { outlineId, allPoints, questions, skippedReasons } = ctx;
 
   for (const d of drafts) {
     if (!d || typeof d.stem !== 'string' || !d.stem.trim()) {
@@ -271,20 +432,6 @@ export async function generateQuestions(
       rubric: d.rubric?.length ? d.rubric : undefined,
     });
   }
-
-  // 被跳过的题要说出来。静默丢弃会让用户以为"模型只出了这么几道"。
-  if (skippedReasons.length) {
-    const summary = [...new Set(skippedReasons)].join('；');
-    onWarning?.(`有 ${skippedReasons.length} 道题格式不完整，已跳过（${summary}）。`);
-  }
-  if (!questions.length) {
-    throw new Error(
-      `模型返回的 ${drafts.length} 道题都无法使用（${[...new Set(skippedReasons)].join('；')}），请重试或换个模型。`,
-    );
-  }
-
-  await db.questions.bulkPut(questions);
-  return questions;
 }
 
 /** 组卷 */
