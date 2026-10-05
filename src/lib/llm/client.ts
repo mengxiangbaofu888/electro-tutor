@@ -67,6 +67,8 @@ export interface ChatResult {
   usage?: { prompt?: number; completion?: number };
   /** 推理型模型的思维链（content 为空时用来判断"它到底想没想"） */
   reasoning?: string;
+  /** 服务端原始返回（出问题时用来诊断：是空 JSON、还是只有 [DONE]） */
+  raw?: string;
 }
 
 /* ------------------------------ 原生 HTTP 通路 ------------------------------ */
@@ -267,17 +269,31 @@ function buildBody(config: LLMConfig, messages: ChatMessage[], opts: ChatOptions
  *
  * 现在：空内容一律当失败，并且把可能的原因和下一步说清楚。
  */
-function emptyReplyError(config: LLMConfig, reasoning: string, opts: ChatOptions): Error {
+function emptyReplyError(
+  config: LLMConfig,
+  reasoning: string,
+  opts: ChatOptions,
+  rawSnippet = '',
+): Error {
   const where = `${config.model || '(未填模型)'} @ ${hostOf(config.baseUrl)}`;
   const sawReasoning = reasoning.trim().length > 0;
+  // 把服务端**实际返回的东西**带一小段出来：没有这个，排查只能靠猜
+  // （用户截图里那句"一个字都没有"就没法区分"返回了空 JSON"和"只返回了 [DONE]"）
+  const snippet = rawSnippet.trim()
+    ? ` 服务端原文开头：${rawSnippet.trim().slice(0, 200).replace(/\s+/g, ' ')}`
+    : '';
   return new Error(
     (sawReasoning
       ? `模型只输出了思考内容、没有给出最终答案（${where}）。`
       : `模型返回了空内容（HTTP 200 但一个字都没有，${where}）。`) +
       '常见原因：① 这是推理型模型且 max_tokens 太小，额度被"思考"用光了；' +
-      '② 模型名不对或该模型不支持这种请求方式；③ 服务商侧异常。' +
-      (opts.jsonMode ? '（本次要的是 JSON，App 应当已自动关闭思考模式，若仍为空请换个模型。）' : '') +
-      ' 建议：到「我的 → 模型配置」点「测试连接」看是否也是空回复。',
+      '② 流式返回与"关闭思考"的组合在某些服务商上会返回空；' +
+      '③ 模型名不对或该模型不支持这种请求方式；④ 服务商侧异常。' +
+      (opts.jsonMode ? '（本次要的是 JSON，App 应当已自动关闭思考模式。）' : '') +
+      ' App 已经自动重试过（流式→非流式、去掉 JSON 模式参数），仍失败才报这条。' +
+      ' 建议：到「我的 → 模型配置」点「测试连接」看是否也是空回复；' +
+      '若测试正常而出题为空，请把这条错误连同"服务端原文"一起反馈。' +
+      snippet,
   );
 }
 
@@ -369,7 +385,7 @@ export async function chat(
         }
       }
     }
-    throw emptyReplyError(config, extractReasoning(res.data), opts);
+    throw emptyReplyError(config, extractReasoning(res.data), opts, safeStringify(res.data));
   }
 
   // 浏览器通路：自己实现空闲超时（以前这里完全没有超时，卡住就是永远卡住）
@@ -455,7 +471,7 @@ export async function chat(
         clear();
         opts.signal?.removeEventListener('abort', onOuterAbort);
         const out = finalize(await retry.json(), opts);
-        if (!out.content.trim()) throw emptyReplyError(config, out.reasoning ?? '', opts);
+        if (!out.content.trim()) throw emptyReplyError(config, out.reasoning ?? '', opts, out.raw ?? '');
         return out;
       }
       bodyText = await readErrorBody(retry);
@@ -482,6 +498,26 @@ export async function chat(
 
   // HTTP 200 但没有正文**不是成功**。空回复曾经被当成"连接成功"报给用户，
   // 结果他真去出题时全是"模型没有返回合法 JSON"——必须在这里拦住。
+  //
+  // 拦之前先自救两次，按最可能的原因排序：
+  //  ① **流式返回空 → 换非流式再来一次**。
+  //     实测证据：同一模型、同样关着思考，"测试连接"（非流式）正常，
+  //     一出题（我为了显示进度用了流式）就空 —— 差别只有流式这一个。
+  //  ② 发过 response_format → 去掉它再来一次（DeepSeek 的 JSON Output
+  //     有概率返回空 content，官方文档已承认）。
+  if (!result.content.trim() && streaming) {
+    try {
+      const plainRes = await doFetch(buildBody(config, messages, { ...opts, onDelta: undefined }, false));
+      if (plainRes.ok) {
+        const plainOut = finalize(await plainRes.json(), opts);
+        if (plainOut.content.trim()) result = plainOut;
+      }
+    } catch {
+      // 重试也失败就继续往下走，最终按空回复报错
+    } finally {
+      clear();
+    }
+  }
   if (!result.content.trim() && sentResponseFormat && !streaming) {
     // 去掉 response_format 再试一次：DeepSeek 的 JSON Output 会概率性返回空内容
     // （官方文档已承认）。提示词里本来就要求只输出 JSON，去掉它通常就好了。
@@ -498,7 +534,7 @@ export async function chat(
     }
   }
   if (!result.content.trim()) {
-    throw emptyReplyError(config, result.reasoning ?? '', opts);
+    throw emptyReplyError(config, result.reasoning ?? '', opts, result.raw ?? '');
   }
   return result;
 }
@@ -518,7 +554,17 @@ function finalize(json: unknown, opts: ChatOptions): ChatResult {
   const usage = extractUsage(json);
   const reasoning = extractReasoning(json);
   if (opts.onDelta && content) opts.onDelta(content);
-  return reasoning ? { content, usage, reasoning } : { content, usage };
+  const raw = safeStringify(json);
+  return reasoning ? { content, usage, reasoning, raw } : { content, usage, raw };
+}
+
+/** 把响应转成便于诊断的短字符串（不能因为循环引用之类的把流程搞崩） */
+function safeStringify(value: unknown): string {
+  try {
+    return typeof value === 'string' ? value : JSON.stringify(value ?? '');
+  } catch {
+    return '';
+  }
 }
 
 /** 取思维链内容（DeepSeek 等把 CoT 放在与 content 同级的 reasoning_content） */
@@ -620,7 +666,7 @@ async function streamResponse(
     }
   }
 
-  return reasoning ? { content: full, reasoning } : { content: full };
+  return reasoning ? { content: full, reasoning, raw: rawAll } : { content: full, raw: rawAll };
 }
 
 /* ------------------------------ 视觉（识图） ------------------------------ */

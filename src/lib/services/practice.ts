@@ -418,18 +418,15 @@ export async function generateMicroLesson(params: {
 
   const profile = await getProfile();
   const messages = buildMicroLessonMessages({ knowledgePoint: point, track, wrongExamples, profile });
-  let raw = '';
+  // **不走流式**：实测同一模型非流式正常、流式会返回空内容（见 llm/client.ts 的说明）
+  onProgress?.('正在生成补强讲义（一次性请求）…');
   const res = await chat(config, messages, {
     jsonMode: true,
     temperature: 0.6,
     maxTokens: 4096,
-    onDelta: (d) => {
-      raw += d;
-      onProgress?.(d);
-    },
   });
 
-  const draft = parseJsonLoose<MicroLessonDraft>(res.content || raw, '补强讲义');
+  const draft = parseJsonLoose<MicroLessonDraft>(res.content, '补强讲义');
   if (!draft.body) throw new Error('模型没有返回讲义内容，请稍后再试。');
 
   // 把巩固题存进题库，下次可以直接练

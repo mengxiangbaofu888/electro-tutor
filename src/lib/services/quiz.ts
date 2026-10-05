@@ -280,6 +280,7 @@ export async function generateQuestions(
               },
             ];
       try {
+        onProgress?.(`正在出第 ${i + 1}/${batches.length} 批（本批 ${batchCount} 道）…`);
         const result = await chat(config, attemptMessages, {
           jsonMode: true,
           temperature: 0.7,
@@ -288,10 +289,8 @@ export async function generateQuestions(
           // 表现就是"模型没有返回合法 JSON（no braces）"。jsonMode 会自动关思考，
           // 但不同服务商行为不一，所以这里给一个足够的下限。
           maxTokens: Math.max(4096, 800 + batchCount * 400),
-          onDelta: (delta) => {
-            raw += delta;
-            onProgress?.(delta);
-          },
+          // **不走流式**：实测同一模型（deepseek-flash）非流式正常、流式返回空内容。
+          // 出题进度由 onBatch 报（"已出 N / 共 M 道"），比逐字刷 JSON 更有用。
         });
         const text = result.content || raw;
         drafts = parseArrayLoose<QuestionDraft>(text, '题目');

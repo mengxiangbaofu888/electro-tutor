@@ -395,6 +395,41 @@ describe('JSON Output 的概率性空回复（DeepSeek 官方文档自己承认�
   });
 });
 
+describe('流式返回空 → 自动改用非流式（实测差别只有"流式"这一个）', () => {
+  it('流式只回了 [DONE]，改非流式就拿到了内容', async () => {
+    const sawStream: boolean[] = [];
+    handler = (_req, res, body) => {
+      const isStream = Boolean((JSON.parse(body) as { stream?: boolean }).stream);
+      sawStream.push(isStream);
+      if (isStream) {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write('data: [DONE]\n\n');
+        res.end();
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: '非流式拿到的内容' } }] }));
+    };
+    const out = await chat(cfg(), userMsg, { onDelta: () => {} });
+    expect(out.content).toBe('非流式拿到的内容');
+    expect(sawStream).toEqual([true, false]);
+  });
+
+  it('空回复的错误里要带上服务端原文（用户截图才能帮我定位）', async () => {
+    handler = (_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({ choices: [{ message: { content: '' }, finish_reason: 'length' }] }),
+      );
+    };
+    const err = await chat(cfg({ model: 'gpt-4o-mini' }), userMsg, { jsonMode: true }).catch(
+      (e: Error) => e,
+    );
+    expect((err as Error).message).toContain('服务端原文开头');
+    expect((err as Error).message).toContain('finish_reason');
+  });
+});
+
 /* ============================== 请求拼装 ============================== */
 
 describe('请求拼装', () => {

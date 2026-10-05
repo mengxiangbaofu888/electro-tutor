@@ -130,19 +130,16 @@ export async function generateOutline(params: {
   const profile = await getProfile();
   const messages = buildOutlineMessages({ track, materialText: text, profile, extraInstruction });
 
-  let raw = '';
+  // **不走流式**：实测同一模型（deepseek-flash）非流式的"测试连接"正常，
+  // 而流式请求会返回空内容（HTTP 200、一个字都没有）。要 JSON 的任务
+  // 本来也不需要逐字显示，进度由界面上的状态提示承担。
+  onProgress?.('正在让模型读材料并归纳知识点（一次性请求，完成后直接显示结果）…');
   const res = await chat(config, messages, {
     jsonMode: true,
     temperature: 0.3,
-    onDelta: (delta) => {
-      raw += delta;
-      onProgress?.(delta);
-    },
   });
 
-  // 优先用返回值，流式回调只作为兜底。
-  // 只依赖 onDelta 是脆弱的：换一个不回调的实现（或非流式通道）就会解析到空字符串。
-  const draftText = res.content || raw;
+  const draftText = res.content;
   const draft = parseJsonLoose<{ title?: string; nodes?: unknown }>(draftText, '大纲');
 
   // 先规范化再落库：模型可能把节点名写成 title/label，

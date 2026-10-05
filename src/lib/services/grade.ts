@@ -390,18 +390,15 @@ export async function buildReport(params: {
     profile,
   });
 
-  let raw = '';
   try {
+    // **不走流式**：实测同一模型非流式正常、流式会返回空内容（见 llm/client.ts 的说明）
+    onProgress?.('正在让模型批改（一次性请求）…');
     const res = await chat(config, messages, {
       jsonMode: true,
       temperature: 0.4,
       maxTokens: 4096,
-      onDelta: (delta) => {
-        raw += delta;
-        onProgress?.(delta);
-      },
     });
-    const draft = parseJsonLoose<ReportDraft>(res.content || raw, '学习报告');
+    const draft = parseJsonLoose<ReportDraft>(res.content, '学习报告');
     return normalizeReportDraft(draft, score, localWeak);
   } catch (e) {
     return {
