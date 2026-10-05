@@ -20,8 +20,12 @@ function sliceBraces(text: string): string | null {
   ];
   for (const [open, close] of candidates) {
     const start = text.indexOf(open);
+    if (start === -1) continue;
     const end = text.lastIndexOf(close);
-    if (start !== -1 && end > start) return text.slice(start, end + 1);
+    if (end > start) return text.slice(start, end + 1);
+    // 找不到闭合符号：很可能是被 max_tokens 截断了，
+    // 先原样返回，交给后面的 closeUnbalanced 去补括号
+    return text.slice(start);
   }
   return null;
 }
