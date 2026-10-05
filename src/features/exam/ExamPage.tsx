@@ -72,10 +72,17 @@ export function ExamPage() {
     void load();
   }, [load]);
 
+  // 用时按「墙上时间」算，而不是每次 tick 加一。
+  // 手机切后台 / 锁屏时，浏览器会把计时器节流甚至挂起，
+  // tick 计数会严重偏小，限时卷的倒计时与自动交卷都会跟着失准。
   useEffect(() => {
-    const t = setInterval(() => setElapsed((e) => e + 1), 1000);
-    return () => clearInterval(t);
-  }, []);
+    if (!attempt) return;
+    const { startedAt } = attempt;
+    const tick = () => setElapsed(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+    tick();
+    const timer = setInterval(tick, 1000);
+    return () => clearInterval(timer);
+  }, [attempt]);
 
   // 已经交过卷就直接跳报告
   useEffect(() => {

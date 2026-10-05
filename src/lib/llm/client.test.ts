@@ -12,7 +12,7 @@ import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { LLMConfig } from '../db/types';
 import { chat, listModels, resolveUrl, truncateText } from './client';
-import { chatCompletionsUrl, modelsUrl } from './presets';
+import { chatCompletionsUrl, isPrivateEndpoint, modelsUrl } from './presets';
 
 /* ------------------------------ 替身服务 ------------------------------ */
 
@@ -292,5 +292,39 @@ describe('接口地址拼装', () => {
     );
     expect(modelsUrl('https://api.deepseek.com/v1')).toBe('https://api.deepseek.com/v1/models');
     expect(modelsUrl('https://api.deepseek.com/v1/models')).toBe('https://api.deepseek.com/v1/models');
+  });
+});
+
+describe('是不是局域网地址（决定要不要警告明文传输）', () => {
+  it('本机与私有网段算局域网', () => {
+    for (const url of [
+      'http://localhost:11434/v1',
+      'http://127.0.0.1:8080/v1',
+      'http://192.168.1.10:11434/v1',
+      'http://10.0.2.2:11434/v1', // 安卓模拟器访问宿主机
+      'http://172.16.5.5/v1',
+      'http://172.31.255.1/v1',
+      'http://nas.local/v1',
+    ]) {
+      expect(isPrivateEndpoint(url), url).toBe(true);
+    }
+  });
+
+  it('公网地址不算，172 的边界也要判对', () => {
+    for (const url of [
+      'https://api.deepseek.com/v1',
+      'http://api.example.com/v1',
+      'http://8.8.8.8/v1',
+      'http://172.15.0.1/v1', // 不在 172.16~172.31 范围内
+      'http://172.32.0.1/v1',
+      'http://192.169.1.1/v1', // 不是 192.168
+    ]) {
+      expect(isPrivateEndpoint(url), url).toBe(false);
+    }
+  });
+
+  it('地址写得不合法时当作非局域网（宁可不放过警告）', () => {
+    expect(isPrivateEndpoint('随便写的东西')).toBe(false);
+    expect(isPrivateEndpoint('')).toBe(false);
   });
 });

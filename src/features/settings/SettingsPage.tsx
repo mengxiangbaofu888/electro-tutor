@@ -26,7 +26,7 @@ import type {
   TrackId,
 } from '../../lib/db/types';
 import { TRACK_LABELS } from '../../lib/db/types';
-import { PROVIDER_PRESETS, chatCompletionsUrl, makeConfig } from '../../lib/llm/presets';
+import { PROVIDER_PRESETS, chatCompletionsUrl, isPrivateEndpoint, makeConfig } from '../../lib/llm/presets';
 import { listModels, testConnection } from '../../lib/llm/client';
 import { refreshLearnerProfile } from '../../lib/services/practice';
 import { exportQuestionsCsv } from '../../lib/services/bank';
@@ -439,6 +439,14 @@ export function SettingsPage() {
                 onChange={(v) => setEditing({ ...editing, baseUrl: v })}
               />
             </Field>
+            {editing.baseUrl.trim().toLowerCase().startsWith('http://') &&
+              !isPrivateEndpoint(editing.baseUrl) && (
+                <Alert tone="warn">
+                  这个地址是 http://（明文），API Key 会以明文在网络里传输。
+                  只有在你完全信任该地址时才这样配；局域网里的本地模型
+                  （192.168.x.x / 10.x.x.x / localhost）不受影响。
+                </Alert>
+              )}
             <Field label="API Key">
               <TextInput
                 password

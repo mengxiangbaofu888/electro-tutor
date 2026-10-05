@@ -265,6 +265,18 @@ describe('答题页交互', () => {
     expect(await db.mistakes.count()).toBe(1);
   });
 
+  it('用时按时间戳算：切后台再回来不会从 00:00 重新计', async () => {
+    const { attemptId, q1 } = await seed();
+    // 把开始时间往前挪 2 分 5 秒，模拟「中途切走了一阵」
+    await db.attempts.update(attemptId, { startedAt: Date.now() - 125_000 });
+
+    renderExam(attemptId);
+    await screen.findByText(q1.stem);
+
+    // 以前是每秒 +1 的计数器，重新进入会从 00:00 开始；现在直接从开始时间算
+    expect(screen.getByText(/用时 02:0[4-9]/)).toBeTruthy();
+  });
+
   it('答题卡能跳到指定题目', async () => {
     const { attemptId, q1, q2 } = await seed();
     renderExam(attemptId);

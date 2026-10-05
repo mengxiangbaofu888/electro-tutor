@@ -99,3 +99,24 @@ export function modelsUrl(baseUrl: string): string {
   if (trimmed.endsWith('/models')) return trimmed;
   return `${trimmed}/models`;
 }
+
+/**
+ * 判断接口地址是不是「局域网 / 本机」——这类地址用 http 是正常的
+ * （本地跑的 Ollama、vLLM 基本都只监听内网）。
+ *
+ * 用途：填了公网 http 地址时提示用户 API Key 会明文传输。
+ */
+export function isPrivateEndpoint(baseUrl: string): boolean {
+  let host: string;
+  try {
+    host = new URL(baseUrl.trim()).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '0.0.0.0') return true;
+  if (host.endsWith('.local')) return true;
+  if (/^10\./.test(host)) return true; // 含安卓模拟器访问宿主机的 10.0.2.2
+  if (/^192\.168\./.test(host)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true;
+  return false;
+}

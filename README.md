@@ -268,7 +268,7 @@ npm run test:watch  # 监听模式
 | `src/features/outline/OutlineListPage.test.tsx` | **大纲页交互**：一键装上四条线真的装进 4 套大纲 + 90 多个知识点，重复点击不会翻倍 |
 | `src/features/pages.render.test.tsx` | **每个页面都能渲染**：用服务端首屏渲染确认 10 个页面在无数据时不会白屏（模块导入即崩、hook 用错、空数据越界） |
 
-当前状态：**173 个用例全部通过**（13 个测试文件）。
+当前状态：**177 个用例全部通过**（13 个测试文件）。
 
 ---
 
@@ -319,6 +319,19 @@ npm run test:watch  # 监听模式
 <summary><b>换手机数据会不会丢？</b></summary>
 
 会。数据只存在当前设备上。换设备前请到「我的 → 数据备份」**导出备份**（一份 JSON，不含 API Key），新设备上导入即可。
+</details>
+
+<details>
+<summary><b>能不能接本地跑的模型（Ollama / vLLM）？</b></summary>
+
+可以。在「模型配置」里把接口地址填成电脑的局域网地址，例如 `http://192.168.1.10:11434/v1`，
+模型 ID 填本地模型名（如 `qwen2.5:7b`）。
+
+两个前提：① 电脑上的 Ollama 要监听局域网（设 `OLLAMA_HOST=0.0.0.0` 后重启）；
+② 手机和电脑在同一个 WiFi 下。
+
+APK 版已经放行了明文 HTTP（安卓 9 起默认禁止），局域网 http 地址可以直接用。
+但如果填的是**公网** http 地址，「模型配置」页会警告你 API Key 会以明文传输。
 </details>
 
 <details>
