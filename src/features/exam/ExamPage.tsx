@@ -338,7 +338,7 @@ export function ExamPage() {
         )}
       </Card>
 
-      {/* ---------------- 翻页 ---------------- */}
+      {/* ---------------- 翻页 / 交卷 ---------------- */}
       <div className="action-bar">
         <Button
           variant="ghost"
@@ -348,22 +348,20 @@ export function ExamPage() {
         >
           ‹ 上一题
         </Button>
-        {index < questions.length - 1 ? (
+        {index < questions.length - 1 && (
           <Button variant="primary" block onClick={() => setIndex((i) => i + 1)}>
             下一题 ›
           </Button>
-        ) : (
-          <Button variant="accent" block loading={busy} onClick={() => submit()}>
-            交卷批改
-          </Button>
         )}
+        {/* 交卷入口始终可见：以前只在最后一题出现，答完第一题想直接交卷会找不到按钮 */}
+        <Button variant="accent" block loading={busy} onClick={() => submit()}>
+          {index < questions.length - 1 ? '交卷' : '交卷批改'}
+        </Button>
       </div>
 
-      {index === questions.length - 1 && !busy && (
-        <div style={{ marginTop: 10 }}>
-          <Button variant="accent" block loading={busy} onClick={() => submit()}>
-            ✅ 交卷并批改（还有 {questions.length - answeredCount} 题未答）
-          </Button>
+      {!busy && answeredCount < questions.length && (
+        <div className="small faint" style={{ textAlign: 'center', marginTop: 8 }}>
+          还有 {questions.length - answeredCount} 题没答
         </div>
       )}
 
