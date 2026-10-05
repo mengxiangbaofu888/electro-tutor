@@ -70,12 +70,40 @@ export interface LLMConfig {
   createdAt: number;
 }
 
+/** 微课：教材上某个二维码指向的一节课 */
+export interface MicroLesson {
+  id: ID;
+  title: string;
+  url: string;
+  addedAt: number;
+}
+
+/**
+ * 一本教材的书目信息。
+ * 来源：拍书皮（视觉模型认字）+ 扫书背条码（ZXing 解 ISBN）+ 扫微课二维码。
+ */
+export interface BookMeta {
+  bookTitle: string;
+  publisher?: string;
+  /** 主编 / 作者 */
+  editor?: string;
+  /** 版次、出版年等 */
+  edition?: string;
+  /** 13 位或 10 位，不带连字符（扫条码得来，已校验） */
+  isbn?: string;
+  /** 书皮照片（压缩后的 dataURL，只存本机） */
+  coverDataUrl?: string;
+  /** 收集到的微课（去重后） */
+  microLessons?: MicroLesson[];
+  updatedAt?: number;
+}
+
 /** 导入的原始学习材料 */
 export interface Material {
   id: ID;
   title: string;
   /** 材料来源 */
-  sourceType: 'text' | 'url' | 'file' | 'image' | 'subtitle';
+  sourceType: 'text' | 'url' | 'file' | 'image' | 'subtitle' | 'book';
   /** URL 或文件名 */
   sourceRef?: string;
   /** 提取出的正文（Markdown/纯文本） */
@@ -84,6 +112,8 @@ export interface Material {
   track?: TrackId;
   createdAt: number;
   warnings?: string[];
+  /** sourceType === 'book' 时：这一本的书目信息与微课清单 */
+  book?: BookMeta;
 }
 
 /** 知识大纲 */

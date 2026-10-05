@@ -253,6 +253,19 @@ export function IngestPage() {
       {message && <Alert tone={message.tone === 'warn' ? 'warn' : message.tone}>{message.text}</Alert>}
       {progress && <Alert>{progress}</Alert>}
 
+      {/* ---------------- 加书（拍照 + 扫码） ---------------- */}
+      <Card title="📚 加一本教材（拍书皮 + 扫二维码）" extra={<Badge tone="primary">新</Badge>}>
+        <p className="small muted" style={{ marginTop: 0 }}>
+          有纸书的话用这条：拍书皮自动认书名/出版社/主编，扫书背条码拿 ISBN，
+          再把书里每节的微课二维码拍照批量解出来攒好——不用一节一节手抄链接。
+        </p>
+        <div className="btn-row">
+          <Button variant="primary" onClick={() => navigate('/book')}>
+            去加一本教材
+          </Button>
+        </div>
+      </Card>
+
       {/* ---------------- 导入 ---------------- */}
       <Card title="➕ 添加学习材料">
         <Field label="属于哪条学习线">
@@ -442,4 +455,5 @@ const SOURCE_LABELS: Record<Material['sourceType'], string> = {
   file: '文件',
   image: '识图',
   subtitle: '字幕',
+  book: '教材',
 };
