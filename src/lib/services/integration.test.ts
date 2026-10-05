@@ -32,6 +32,7 @@ const {
   getTodayReview,
   getWeakPoints,
   generateMicroLesson,
+  ensureQuestionsForPoints,
 } = await import('./practice');
 const { installSeedOutline } = await import('../seed');
 
@@ -418,6 +419,54 @@ describe('内置起步大纲', () => {
     // 讲解本身要留档，方便回看
     const mats = await db.materials.toArray();
     expect(mats.some((m) => m.title.startsWith('补强讲义：'))).toBe(true);
+  });
+});
+
+describe('保证有题可做（每日复习的入口）', () => {
+  it('题库为空时现场出题，出完就落在题库里', async () => {
+    const { points } = await installSeedOutline('fundamental');
+    const target = points.find((p) => p.name.includes('欧姆定律'))!;
+    chatMock.mockClear();
+
+    const questions = await ensureQuestionsForPoints({ pointIds: [target.id], targetCount: 3 });
+
+    expect(questions.length).toBeGreaterThan(0);
+    expect(chatMock).toHaveBeenCalledTimes(1);
+    // 生成的题要挂到正确的知识点上，否则掌握度统计不到
+    expect(questions.some((q) => q.knowledgePointIds.includes(target.id))).toBe(true);
+    // 真的入库了，下一次不用再花钱
+    expect(await db.questions.where('knowledgePointIds').equals(target.id).count()).toBeGreaterThan(0);
+  });
+
+  it('题库里已经够了就直接用，不再调用模型', async () => {
+    const { points } = await installSeedOutline('fundamental');
+    const target = points.find((p) => p.name.includes('欧姆定律'))!;
+    await db.questions.bulkPut(
+      [1, 2, 3].map((i) => ({
+        id: newId(),
+        knowledgePointIds: [target.id],
+        type: 'single' as const,
+        stem: `已有题目 ${i}`,
+        options: [{ key: 'A', text: '甲' }],
+        answer: 'A',
+        explanation: '',
+        difficulty: 2,
+        source: 'ai' as const,
+        createdAt: Date.now(),
+      })),
+    );
+    chatMock.mockClear();
+
+    const questions = await ensureQuestionsForPoints({ pointIds: [target.id], targetCount: 3 });
+
+    expect(questions).toHaveLength(3);
+    expect(chatMock).not.toHaveBeenCalled();
+  });
+
+  it('知识点已经不存在时给出明确的中文错误', async () => {
+    await expect(ensureQuestionsForPoints({ pointIds: ['根本不存在的点'], targetCount: 3 })).rejects.toThrow(
+      /已经不存在/,
+    );
   });
 });
 

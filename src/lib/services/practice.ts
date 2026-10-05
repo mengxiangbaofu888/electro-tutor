@@ -12,9 +12,11 @@ import type {
   MicroLessonRow,
   MistakeNote,
   Question,
+  QuestionType,
   TrackId,
 } from '../db/types';
 import { chat } from '../llm/client';
+import { generateQuestions, listQuestionsByPoints } from './quiz';
 import { parseJsonLoose, parseArrayLoose } from '../llm/json';
 import {
   buildMicroLessonMessages,
@@ -36,6 +38,90 @@ import {
 
 /** 每累计答这么多题，就刷新一次学习者画像 */
 const PROFILE_REFRESH_EVERY = 20;
+
+/* ------------------------------ 保证有题可做 ------------------------------ */
+
+/** 随机取 n 个元素（不改原数组） */
+function sample<T>(arr: T[], n: number): T[] {
+  const copy = [...arr];
+  for (let i = copy.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy.slice(0, n);
+}
+
+/**
+ * 保证这批知识点下有题可做：题库里够就直接用，不够就**现场补生成**。
+ *
+ * 为什么必须有这个函数：首页的「今日复习」「专项突破」都是以知识点为入口的，
+ * 如果题库里这些点还没有题，用户点进来只会看到一句"还没有题目"，
+ * 而唯一能出题的入口在另一个页面——每日复习这条核心闭环就断在这里。
+ *
+ * 出题顺序按掌握度加权（越薄弱出得越多），与「自适应出题」用的是同一套引擎。
+ */
+export async function ensureQuestionsForPoints(params: {
+  pointIds: ID[];
+  targetCount?: number;
+  /** 状态提示（例如"正在为你补 8 道题…"） */
+  onStatus?: (text: string) => void;
+  /** 模型流式输出 */
+  onProgress?: (delta: string) => void;
+}): Promise<Question[]> {
+  const { pointIds, targetCount = 10, onStatus, onProgress } = params;
+  if (!pointIds.length) throw new Error('没有指定知识点。');
+
+  const existing = await listQuestionsByPoints(pointIds);
+  if (existing.length >= targetCount) return sample(existing, targetCount);
+
+  const points = (await db.knowledgePoints.bulkGet(pointIds)).filter(
+    (p): p is KnowledgePoint => Boolean(p),
+  );
+  if (!points.length) throw new Error('这些知识点已经不存在了，请返回上级页面刷新后再试。');
+
+  const outlineId = points[0].outlineId;
+  const outline = await db.outlines.get(outlineId);
+  const track: TrackId = outline?.track ?? 'fundamental';
+
+  // 按掌握度把缺的题量分到这些知识点上
+  const needed = Math.max(targetCount - existing.length, 3);
+  const records = await db.mastery.bulkGet(pointIds);
+  const inputs: MasteryInput[] = pointIds.map((id, i) => ({
+    knowledgePointId: id,
+    name: points.find((p) => p.id === id)?.name ?? id,
+    record: records[i],
+  }));
+  const weights = questionWeights(inputs, Date.now());
+  const allocation = Object.entries(allocateQuestions(weights, needed))
+    .filter(([, count]) => count > 0)
+    .map(([pointId, count]) => ({ pointId, count }));
+  if (!allocation.length) throw new Error('这些知识点暂时无法出题。');
+
+  const typeMix: { type: QuestionType; count: number }[] = [
+    { type: 'single', count: Math.max(1, Math.round(needed * 0.4)) },
+    { type: 'judge', count: Math.max(1, Math.round(needed * 0.25)) },
+    { type: 'multiple', count: Math.max(1, Math.round(needed * 0.2)) },
+    { type: 'blank', count: Math.max(1, Math.round(needed * 0.15)) },
+  ];
+
+  onStatus?.(
+    existing.length
+      ? `这些知识点下只有 ${existing.length} 道题，正在再补 ${needed} 道…`
+      : `这些知识点下还没有题，正在为你出 ${needed} 道…`,
+  );
+  const generated = await generateQuestions({
+    outlineId,
+    track,
+    allocation,
+    typeMix,
+    difficultyMix: '标准：以 2~3 星为主，穿插一道稍难的',
+    withMaterial: true,
+    onProgress,
+  });
+  onStatus?.('');
+
+  return sample([...existing, ...generated], targetCount);
+}
 
 /* ------------------------------ 掌握度与错题本 ------------------------------ */
 

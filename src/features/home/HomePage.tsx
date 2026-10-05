@@ -6,8 +6,8 @@ import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { db, getDefaultLLM, getProfile } from '../../lib/db/db';
 import type { Attempt, LearnerProfile } from '../../lib/db/types';
-import { getTodayReview, getWeakPoints, type ReviewItem } from '../../lib/services/practice';
-import { listQuestionsByPoints, startQuickPractice } from '../../lib/services/quiz';
+import { getTodayReview, getWeakPoints, ensureQuestionsForPoints, type ReviewItem } from '../../lib/services/practice';
+import { startQuickPractice } from '../../lib/services/quiz';
 import { installAllSeedOutlines } from '../../lib/seed';
 import { Alert, Badge, Button, Card, Empty, Loading, Progress, Stat } from '../../components/ui';
 
@@ -32,6 +32,7 @@ export function HomePage() {
   const [error, setError] = useState('');
   const [fatal, setFatal] = useState('');
   const [outlineCount, setOutlineCount] = useState(0);
+  const [status, setStatus] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -77,24 +78,32 @@ export function HomePage() {
     void load();
   }, [load]);
 
-  /** 从一组知识点里凑题开始练习 */
+  /**
+   * 从一组知识点凑题开始练习。
+   * 题库里不够时会现场补生成——否则新用户点「今日复习」只会看到"还没有题目"，
+   * 而唯一能出题的入口在别的页面，核心闭环就断了。
+   */
   async function practiceFromPoints(pointIds: string[], title: string, limit = 10) {
     setBusy(pointIds[0] ?? 'x');
     setError('');
+    setStatus('');
     try {
-      const pool = await listQuestionsByPoints(pointIds);
-      if (!pool.length) {
-        setError('这些知识点下还没有题目。请到「练习」页先生成一批题目。');
+      const questions = await ensureQuestionsForPoints({
+        pointIds,
+        targetCount: limit,
+        onStatus: setStatus,
+      });
+      if (!questions.length) {
+        setError('这次没能出出题来，请到「练习」页手动生成一批。');
         return;
       }
-      // 打乱后取前 limit 道
-      const shuffled = [...pool].sort(() => Math.random() - 0.5).slice(0, limit);
-      const attempt = await startQuickPractice({ title, questions: shuffled });
+      const attempt = await startQuickPractice({ title, questions });
       navigate(`/exam/${attempt.id}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy('');
+      setStatus('');
     }
   }
 
@@ -141,6 +150,7 @@ export function HomePage() {
         </Alert>
       )}
       {error && <Alert tone="error">{error}</Alert>}
+      {status && <Alert>{status}</Alert>}
 
       {/* ---------------- 新用户引导 ---------------- */}
       {outlineCount === 0 && (
