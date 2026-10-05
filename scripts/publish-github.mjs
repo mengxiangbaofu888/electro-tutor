@@ -181,8 +181,15 @@ if (tags.length) {
 console.log('\n=== 5/5 完成 ===');
 console.log(`  仓库地址：https://github.com/${me.login}/${REPO}`);
 console.log(`  提交历史：${git(['rev-list', '--count', 'HEAD'], { silent: true }).stdout.trim()} 个提交`);
-console.log('\n下一步建议：');
-console.log('  1) 到仓库 Settings → Actions → General，确认 Workflow permissions 允许写入');
-console.log('  2) 打个标签触发自动出包：');
-console.log('       git tag -a v0.3.0 -m "v0.3.0" && git push origin v0.3.0');
-console.log('  3) 用完后到 https://github.com/settings/tokens 删掉这个 Token');
+if (tags.length) {
+  // 标签已经推上去了：CI 会自动出包并创建 Release。
+  // （这段以前无论成功失败都打印"打个标签触发自动出包"，
+  //   结果我自己两次把成功误读成失败——收尾提示必须按实际情况说话。）
+  console.log(`  标签已推送（共 ${tags.length} 个）：CI 会自动编译 APK 并创建 Release。`);
+  console.log(`  查看进度：https://github.com/${me.login}/${REPO}/actions`);
+  console.log(`  下载地址：https://github.com/${me.login}/${REPO}/releases`);
+} else {
+  console.log('  还没有任何标签。要出包的话：');
+  console.log('     git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0');
+}
+console.log('  用完后到 https://github.com/settings/tokens 删掉这个 Token');
