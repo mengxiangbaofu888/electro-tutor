@@ -604,7 +604,16 @@ export async function visionExtract(
     ],
     // 识图本身比纯文本慢（图片要上传、模型要多看一轮），所以给更宽的空闲上限；
     // 但仍然要有上限——没有上限时用户看到的就是"点了一下然后一直转圈"。
-    { ...opts, temperature: opts.temperature ?? 0.2, idleTimeoutMs: opts.idleTimeoutMs ?? VISION_IDLE_TIMEOUT_MS },
+    //
+    // **识图也默认关掉思考模式**：读一张书皮/一张电路图是"把图里的东西抄出来"，
+    // 不需要长篇思维链；而开着思考时（DeepSeek 的 deepseek-flash 默认开）
+    // 又慢、又可能因为额度被思考吃光而返回空内容——用户看到的就是"识图没反应/识别不出来"。
+    {
+      ...opts,
+      temperature: opts.temperature ?? 0.2,
+      thinking: opts.thinking ?? 'off',
+      idleTimeoutMs: opts.idleTimeoutMs ?? VISION_IDLE_TIMEOUT_MS,
+    },
   );
   return result.content;
 }

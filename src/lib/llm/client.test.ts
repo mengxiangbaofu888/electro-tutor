@@ -19,6 +19,7 @@ import {
   testConnection,
   testVisionConnection,
   truncateText,
+  visionExtract,
 } from './client';
 import { chatCompletionsUrl, isPrivateEndpoint, modelsUrl } from './presets';
 
@@ -219,6 +220,15 @@ describe('验证"这个模型到底能不能看图"', () => {
 
 describe('推理型模型的思考模式（deepseek-flash 默认开思考，这是"一用就全是问题"的根因）', () => {
   const deepseek = () => cfg({ model: 'deepseek-flash' });
+
+  it('识图也默认关掉思考模式（读图是"抄出来"，不需要长篇思维链；开着又慢又可能空回复）', async () => {
+    handler = respondOk;
+    await visionExtract(cfg({ model: 'deepseek-flash', kind: 'vision' }), ['data:image/png;base64,AAA'], '看图');
+    const body = JSON.parse(received[0].body) as Record<string, unknown>;
+    expect(body.thinking).toEqual({ type: 'disabled' });
+    expect(body.image_url).toBeUndefined(); // 图片在 messages 里，不在顶层
+    expect(received[0].body).toContain('image_url');
+  });
 
   it('要 JSON 的任务自动关掉思考模式', async () => {
     handler = respondOk;
