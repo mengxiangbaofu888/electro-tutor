@@ -157,6 +157,83 @@ export function buildBookContent(meta: BookMeta): string {
   return lines.join('\n');
 }
 
+/* ============================== 让 App 自己去抓微课内容 ============================== */
+
+/** 正文少于这么多字，就认为"没抓到有用的东西"（多半是个视频页/需要登录） */
+export const MIN_USABLE_CONTENT = 200;
+
+export function isUsableContent(text: string, min = MIN_USABLE_CONTENT): boolean {
+  return String(text ?? '').trim().length >= min;
+}
+
+export interface MicroLessonContent {
+  lesson: MicroLesson;
+  title: string;
+  content: string;
+}
+
+export interface MicroLessonFailure {
+  lesson: MicroLesson;
+  /** 给人看的原因，不是错误码 */
+  reason: string;
+}
+
+export interface CollectResult {
+  ok: MicroLessonContent[];
+  failed: MicroLessonFailure[];
+}
+
+/**
+ * 把书里扫到的微课链接**逐个抓成正文**，好拿去做材料、出题。
+ *
+ * 为什么要有这一步：二维码只给出一个链接，用户要的是"内容"。
+ * App 自己去打开这些页面、把正文抠出来——用户就不用一页页点开看了。
+ *
+ * 抓取函数是**注入**的（默认用 App 现有的 extractFromUrl），
+ * 这样纯逻辑可测，也方便以后换实现。
+ *
+ * 诚实处理：不少微课二维码指向的是**视频页**，抓不到正文。
+ * 这种不报"成功"，而是给出原因让人知道下一步该干嘛（拍视频画面 / 直接去看）。
+ */
+export async function collectMicroLessonMaterials(params: {
+  lessons: MicroLesson[];
+  extract: (url: string) => Promise<{ text: string; title?: string }>;
+  onProgress?: (done: number, total: number, lesson: MicroLesson) => void;
+}): Promise<CollectResult> {
+  const { lessons, extract, onProgress } = params;
+  const ok: MicroLessonContent[] = [];
+  const failed: MicroLessonFailure[] = [];
+
+  for (let i = 0; i < lessons.length; i++) {
+    const lesson = lessons[i];
+    onProgress?.(i, lessons.length, lesson);
+    try {
+      const res = await extract(lesson.url);
+      const text = String(res?.text ?? '').trim();
+      if (!isUsableContent(text)) {
+        failed.push({
+          lesson,
+          reason: `这个链接只抓到 ${text.length} 个字，多半是视频页或需要登录。建议直接点开看，或者把视频里的板书/画面拍下来用「拍照识图」。`,
+        });
+        continue;
+      }
+      ok.push({
+        lesson,
+        title: (res?.title ?? '').trim() || lesson.title || '微课',
+        content: text,
+      });
+    } catch (e) {
+      failed.push({
+        lesson,
+        reason: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  onProgress?.(lessons.length, lessons.length, lessons[lessons.length - 1]);
+  return { ok, failed };
+}
+
 /* ============================== 可选：用 ISBN 联网补全书目 ============================== */
 
 export interface IsbnLookupResult {

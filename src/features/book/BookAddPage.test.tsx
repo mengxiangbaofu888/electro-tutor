@@ -43,11 +43,25 @@ vi.mock('../../lib/platform/image', async () => {
   };
 });
 
+/** 抓网页正文：默认返回"够用"的正文，测试里可以按链接改造 */
+const extractMock = vi.fn(async (url: string) => ({
+  text: '这是一段足够长的微课正文。'.repeat(30),
+  title: `网页标题-${url.slice(-4)}`,
+}));
+vi.mock('../../lib/extract', () => ({
+  extractFromUrl: (...args: unknown[]) => extractMock(...(args as [string])),
+}));
+
 const { BookAddPage } = await import('./BookAddPage');
 
 beforeEach(async () => {
   scanResults.length = 0;
   visionMock.mockClear();
+  extractMock.mockClear();
+  extractMock.mockImplementation(async (url: string) => ({
+    text: '这是一段足够长的微课正文。'.repeat(30),
+    title: `网页标题-${url.slice(-4)}`,
+  }));
   await db.transaction('rw', [db.materials, db.llmConfigs], async () => {
     await db.materials.clear();
     await db.llmConfigs.clear();
@@ -190,5 +204,59 @@ describe('加教材：拍书皮 → 核对 → 扫码 → 保存', () => {
     fireEvent.change(input, { target: { value: 'https://x.com/manual/1' } });
     fireEvent.click(screen.getByText('加入'));
     await screen.findByText('https://x.com/manual/1');
+  });
+});
+
+describe('让 App 自己去把微课内容抓下来（用户要的是软件自己找到内容）', () => {
+  /** 往微课清单里加一个链接 */
+  async function addMicroLesson(url: string) {
+    const input = screen.getByPlaceholderText('https://…') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: url } });
+    fireEvent.click(screen.getByText('加入'));
+    await screen.findByText(url);
+  }
+
+  it('点一下按钮，App 就逐个打开链接并把正文存成材料', async () => {
+    renderPage();
+    await addMicroLesson('https://x.com/micro/11-1');
+    await addMicroLesson('https://x.com/micro/11-2');
+
+    fireEvent.click(screen.getByText(/让 App 去抓这 2 个微课的内容/));
+
+    await waitFor(async () => expect(await db.materials.count()).toBe(2), { timeout: 8000 });
+    const rows = await db.materials.toArray();
+    expect(rows.map((m) => m.sourceType)).toEqual(['url', 'url']);
+    expect(rows.map((m) => m.sourceRef).sort()).toEqual([
+      'https://x.com/micro/11-1',
+      'https://x.com/micro/11-2',
+    ]);
+    // 标题优先用网页自己的标题
+    expect(rows.some((m) => m.title.startsWith('网页标题-'))).toBe(true);
+    expect(await screen.findByText(/抓到 2 篇正文/)).toBeTruthy();
+  });
+
+  it('抓不到正文（多半是视频页）时明确说原因和下一步，并且不建材料', async () => {
+    extractMock.mockImplementation(async () => ({ text: '请下载客户端观看', title: '视频页' }));
+    renderPage();
+    await addMicroLesson('https://x.com/video/1');
+
+    fireEvent.click(screen.getByText(/让 App 去抓这 1 个微课的内容/));
+
+    const alert = await screen.findByText(/没抓到正文/);
+    expect(alert.textContent).toContain('视频页');
+    expect(alert.textContent).toContain('拍照识图');
+    expect(await db.materials.count()).toBe(0);
+  });
+
+  it('已经抓过的链接不会重复抓（点第二次会说明）', async () => {
+    renderPage();
+    await addMicroLesson('https://x.com/micro/once');
+
+    fireEvent.click(screen.getByText(/让 App 去抓这 1 个微课的内容/));
+    await waitFor(async () => expect(await db.materials.count()).toBe(1), { timeout: 8000 });
+
+    fireEvent.click(screen.getByText(/让 App 去抓这 1 个微课的内容/));
+    expect(await screen.findByText(/之前都抓过了/)).toBeTruthy();
+    expect(await db.materials.count()).toBe(1);
   });
 });

@@ -15,12 +15,14 @@ import { db, getDefaultLLM, newId } from '../../lib/db/db';
 import type { BookMeta, Material, MicroLesson, TrackId } from '../../lib/db/types';
 import { TRACK_LABELS } from '../../lib/db/types';
 import { visionExtract } from '../../lib/llm/client';
+import { extractFromUrl } from '../../lib/extract';
 import { compressImages, formatBytes } from '../../lib/platform/image';
 import { decodeImageFile } from '../../lib/scan/decode';
 import {
   COVER_PROMPT,
   buildBookContent,
   classifyScanForBook,
+  collectMicroLessonMaterials,
   formatIsbnSafe,
   guessMicroLessonTitle,
   lookupIsbn,
@@ -175,7 +177,73 @@ export function BookAddPage() {
     }
   }
 
-  /* ------------------------------ ③ 用 ISBN 联网补全 ------------------------------ */
+  /* ------------------------------ ④ 让 App 自己去把微课内容抓下来 ------------------------------ */
+
+  async function grabMicroLessonContent() {
+    const lessons = meta.microLessons ?? [];
+    if (!lessons.length) return;
+    setBusy('content');
+    setMessage(null);
+    try {
+      // 抓过的链接不再重复抓（材料的 sourceRef 就是那个链接）
+      const existing = new Set(
+        (await db.materials.toArray()).map((m) => m.sourceRef).filter((x): x is string => Boolean(x)),
+      );
+      const todo = lessons.filter((l) => !existing.has(l.url));
+      const skipped = lessons.length - todo.length;
+      if (!todo.length) {
+        setMessage({ tone: 'warn', text: `这 ${lessons.length} 个微课链接的内容之前都抓过了。` });
+        return;
+      }
+
+      setProgress(`正在逐个打开微课页面（共 ${todo.length} 个）…`);
+      const result = await collectMicroLessonMaterials({
+        lessons: todo,
+        extract: extractFromUrl,
+        onProgress: (done, total, lesson) =>
+          setProgress(`正在抓第 ${done + 1} / ${total} 个：${lesson.title}`),
+      });
+
+      for (const item of result.ok) {
+        await db.materials.put({
+          id: newId(),
+          title: item.title,
+          sourceType: 'url',
+          sourceRef: item.lesson.url,
+          content: item.content,
+          charCount: item.content.length,
+          track,
+          createdAt: Date.now(),
+        });
+      }
+
+      const parts = [`抓到 ${result.ok.length} 篇正文，已存成材料`];
+      if (skipped) parts.push(`${skipped} 个之前抓过、跳过`);
+      if (result.failed.length) parts.push(`${result.failed.length} 个没抓到正文`);
+      const reasons = result.failed
+        .slice(0, 2)
+        .map((f) => `《${f.lesson.title}》：${f.reason}`)
+        .join('；');
+
+      setMessage({
+        tone: result.ok.length === 0 ? 'warn' : result.failed.length ? 'warn' : 'ok',
+        text:
+          parts.join('，') +
+          '。' +
+          (reasons ? ` 没抓到的原因：${reasons}` : '') +
+          (result.ok.length
+            ? ' 抓到正文的那些现在可以去「大纲」页生成知识大纲，或者直接拿去出题。'
+            : ''),
+      });
+    } catch (e) {
+      setMessage({ tone: 'error', text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setBusy('');
+      setProgress('');
+    }
+  }
+
+  /* ------------------------------ 用 ISBN 联网补全 ------------------------------ */
 
   async function handleLookup() {
     if (!meta.isbn) return;
@@ -415,6 +483,22 @@ export function BookAddPage() {
             </Button>
           </div>
         </Field>
+
+        {micros.length > 0 && (
+          <>
+            <div className="divider" />
+            <div className="btn-row">
+              <Button variant="primary" loading={busy === 'content'} onClick={grabMicroLessonContent}>
+                让 App 去抓这 {micros.length} 个微课的内容
+              </Button>
+            </div>
+            <p className="small faint" style={{ marginTop: 4 }}>
+              点这个按钮，App 会自己逐个打开上面这些链接、把正文抠出来存成材料，
+              <b>你不用一页页点开看</b>。抓不到正文的（多半是视频页或要登录）
+              会明确告诉你原因和下一步怎么办。
+            </p>
+          </>
+        )}
       </Card>
 
       <div className="btn-row">

@@ -11,7 +11,9 @@ import type { MicroLesson } from '../db/types';
 import {
   buildBookContent,
   classifyScanForBook,
+  collectMicroLessonMaterials,
   guessMicroLessonTitle,
+  isUsableContent,
   mergeMicroLessons,
   parseCoverReading,
 } from './book';
@@ -134,6 +136,71 @@ describe('从链接猜默认标题', () => {
 
   it('不是网址时给个兜底标题', () => {
     expect(guessMicroLessonTitle('乱七八糟')).toBe('微课');
+  });
+});
+
+describe('让 App 自己去抓微课内容', () => {
+  it('抓到正文的进 ok，标题优先用网页标题', async () => {
+    const r = await collectMicroLessonMaterials({
+      lessons: [micro('https://x.com/a', '11.1 触电急救')],
+      extract: async () => ({ text: 'x'.repeat(300), title: '触电急救 - 出版社资源页' }),
+    });
+    expect(r.ok).toHaveLength(1);
+    expect(r.ok[0].title).toBe('触电急救 - 出版社资源页');
+    expect(r.failed).toHaveLength(0);
+  });
+
+  it('网页没标题时退回微课自己的标题', async () => {
+    const r = await collectMicroLessonMaterials({
+      lessons: [micro('https://x.com/a', '11.1 触电急救')],
+      extract: async () => ({ text: 'y'.repeat(500) }),
+    });
+    expect(r.ok[0].title).toBe('11.1 触电急救');
+  });
+
+  it('抓到的东西太少 → 不算成功，并告诉用户下一步该干嘛（多半是视频页）', async () => {
+    const r = await collectMicroLessonMaterials({
+      lessons: [micro('https://x.com/video', '微课视频')],
+      extract: async () => ({ text: '请下载客户端观看' }),
+    });
+    expect(r.ok).toHaveLength(0);
+    expect(r.failed).toHaveLength(1);
+    expect(r.failed[0].reason).toContain('视频页');
+    expect(r.failed[0].reason).toContain('拍照识图');
+  });
+
+  it('单个链接抓失败不影响其他链接，失败原因原样带出', async () => {
+    const r = await collectMicroLessonMaterials({
+      lessons: [micro('https://x.com/bad', '坏的'), micro('https://x.com/good', '好的')],
+      extract: async (url) => {
+        if (url.includes('bad')) throw new Error('连不上这个站点');
+        return { text: 'z'.repeat(400) };
+      },
+    });
+    expect(r.ok.map((o) => o.lesson.url)).toEqual(['https://x.com/good']);
+    expect(r.failed[0].reason).toBe('连不上这个站点');
+  });
+
+  it('进度回调按顺序报，最后一定报到总数', async () => {
+    const seen: number[] = [];
+    await collectMicroLessonMaterials({
+      lessons: [micro('https://x.com/1'), micro('https://x.com/2')],
+      extract: async () => ({ text: 'a'.repeat(300) }),
+      onProgress: (done, total) => seen.push(`${done}/${total}` as unknown as number),
+    });
+    expect(seen.map(String)).toEqual(['0/2', '1/2', '2/2']);
+  });
+
+  it('空清单不炸', async () => {
+    const r = await collectMicroLessonMaterials({ lessons: [], extract: async () => ({ text: '' }) });
+    expect(r).toEqual({ ok: [], failed: [] });
+  });
+
+  it('"内容够不够用"的判定边界', () => {
+    expect(isUsableContent('短')).toBe(false);
+    expect(isUsableContent('字'.repeat(200))).toBe(true);
+    expect(isUsableContent('  ' + '字'.repeat(199) + '  ')).toBe(false);
+    expect(isUsableContent('')).toBe(false);
   });
 });
 
