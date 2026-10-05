@@ -177,3 +177,30 @@ describe('文档里引用的源码路径都存在', () => {
     expect([...new Set(broken)], `文档里引用了不存在的路径：\n${[...new Set(broken)].join('\n')}`).toEqual([]);
   });
 });
+
+/* ============================== 6. 预览页数与文档声明 ============================== */
+
+describe('预览产物页数与文档声明一致', () => {
+  /**
+   * 这条是补一个真实踩过的坑：答题页加进预览之后，
+   * docs/03 里还是写着"生成 8 个"，页面清单里也没有"答题页"。
+   * 这类数字没有任何测试盯着，只能靠人记得改——所以补上。
+   */
+  it('build-preview.mjs 的页面数、docs/03 写的数字、清单里列的条数，三者相等', () => {
+    const script = readText('scripts/build-preview.mjs');
+    const block = /const ROUTES = \[([\s\S]*?)\n\];/.exec(script);
+    expect(block, '在 build-preview.mjs 里找不到 ROUTES 数组').toBeTruthy();
+    const routes = [...block![1].matchAll(/^\s*\['/gm)].length;
+    expect(routes).toBeGreaterThan(0);
+
+    const doc = readText('docs/03-开发与部署步骤.md');
+    const claimed = /生成\s*(\d+)\s*个\*\*自包含的单文件 HTML\*\*/.exec(doc);
+    expect(claimed, 'docs/03 里没有"生成 N 个自包含的单文件 HTML"这句话').toBeTruthy();
+    expect(Number(claimed![1]), 'docs/03 写的预览页数与实际 ROUTES 数量不符').toBe(routes);
+
+    const list = /生成\s*\d+\s*个\*\*自包含的单文件 HTML\*\*（([^）]+)）/.exec(doc);
+    expect(list, 'docs/03 里没有列出预览页面清单').toBeTruthy();
+    const names = list![1].split('/').map((s) => s.replace(/\*/g, '').trim()).filter(Boolean);
+    expect(names.length, `docs/03 的页面清单列了 ${names.length} 项，实际有 ${routes} 个`).toBe(routes);
+  });
+});
