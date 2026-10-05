@@ -31,11 +31,19 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      # 必须用 v4：v3 内部会执行 `sdkmanager tools`，而 Google 已经下架了
+      # 那个遗留的 tools 包，于是 v3 每次都死在 "Failed to find package 'tools'"。
+      # 同时显式指定 packages，避免它去请求已经不存在的东西。
+      # 参考：https://github.com/android-actions/setup-android/issues/537
       - name: 准备 Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
 
       - name: 安装所需的 SDK 组件
-        run: sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
 
       - name: 安装依赖
         run: npm ci
