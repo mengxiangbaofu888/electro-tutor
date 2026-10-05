@@ -89,13 +89,26 @@ npm run dev
 ### 方式二：构建静态站点自己托管
 
 ```bash
-npm run build      # 产物在 dist/
-npm run preview    # 本地预览构建产物
+npm run build      # 类型检查 + 打包，产物在 dist/
+npm run serve      # 用内置极简服务器预览 dist/（默认 http://127.0.0.1:4173）
 ```
 
 `dist/` 是纯静态文件，扔到任何静态托管（GitHub Pages / Vercel / Netlify / 自己的 NAS）都能跑。
 
-### 方式三：打包安卓 APK
+### 方式三：生成单文件离线版
+
+```bash
+npm run build:single   # 产物：dist-single/single.html（约 1.2 MB，CSS/JS 全内联）
+```
+
+得到一个**自包含的 HTML 文件**，双击就能打开，不需要服务器、不需要联网安装。
+适合发到微信里直接在手机上打开，或者拷到 U 盘给别人用。
+
+> ⚠️ 注意：用 `file://` 双击打开时，浏览器不允许页面使用本地数据库（IndexedDB），
+> 所以这个单文件版**必须通过 http 打开**才可用（例如放到任意静态托管上）。
+> 直接双击只会看到一条明确的错误提示，不会白屏。
+
+### 方式四：打包安卓 APK
 
 见 [`docs/03-开发与部署步骤.md`](docs/03-开发与部署步骤.md)。
 
