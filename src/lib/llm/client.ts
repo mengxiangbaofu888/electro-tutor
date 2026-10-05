@@ -463,6 +463,43 @@ export async function visionExtract(
 
 /* ------------------------------ 连通性测试 ------------------------------ */
 
+/**
+ * 一张很小的测试图（48×48：蓝底 + 中间白色圆 + 左上黄色方块）。
+ * 用来验证"这个模型到底能不能看图"，见 testVisionConnection。
+ */
+export const VISION_PROBE_IMAGE =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAABBklEQVR4AdXBTY2WYQyG0WvufBbY0g1CqIOKQQ0mqIMawERtsBnCbsKGvM9PQs95+/Xz0zsLvnz7zv9ADCeGE8OJ4cRwYjgxnBhODCeGE8OJy7qCm14c1hX8rSv4yDw55e3z1x/vHNAVPGWe7BIHdAUruoJdYlNXsKMr2CE2dAUndAWrxKKu4KSuYIUYTizoCm7oCp4Sw4nhxHDioa7gpq7gCfGQeXKTefKEGE4MJ4YTC8yTG8yTp8RwYpF5cpJ5skJsME9OME9WiU3myQ7zZIc4wDxZYZ7senGIefJHV/Av5skpLw4zTz7qCsyTW8Rl5slNYjgxnBhODCeGE8OJ4cRwYjgx3G/+fz2N4sq8TwAAAABJRU5ErkJggg==';
+
+/**
+ * 验证"这个模型到底能不能看图"。
+ *
+ * 为什么单做这个：用户配了识图模型，点「测试连接」显示一切正常——
+ * 因为那只发了一句文字。可**真拿去识别图片时却一直失败或者没反应**，
+ * 原因是很多模型**根本不吃图片输入**（把文本模型填进识图配置是最常见的一种）。
+ * 纯文本的连通性测试永远发现不了这个问题。
+ *
+ * 这里直接发一张真实的小图，让模型说出它看到了什么：
+ *   · 报错 → 这个模型不支持图片输入，当场告诉用户；
+ *   · 答得牛头不对马嘴（没提到蓝/圆）→ 图很可能被忽略了，也要提醒。
+ */
+export async function testVisionConnection(config: LLMConfig): Promise<string> {
+  const reply = await visionExtract(
+    config,
+    [VISION_PROBE_IMAGE],
+    '这是一张很小的测试图。请只回答两点：1) 底色是什么颜色？2) 中间是什么形状？不要解释。',
+    { temperature: 0, maxTokens: 60, idleTimeoutMs: VISION_IDLE_TIMEOUT_MS },
+  );
+  return reply.trim() || '(模型返回为空)';
+}
+
+/** 模型对测试图的回答是否"真的看到了图"（认出蓝色或圆形） */
+export function looksLikeItSawTheImage(reply: string): boolean {
+  const t = String(reply ?? '').toLowerCase();
+  const color = /蓝|blue/.test(t);
+  const shape = /圆|circle|轮/.test(t);
+  return color || shape;
+}
+
 /** 拉取服务商支持的模型列表 */
 export async function listModels(config: LLMConfig): Promise<string[]> {
   const url = resolveUrl(modelsUrl(config.baseUrl), config.proxyPrefix);

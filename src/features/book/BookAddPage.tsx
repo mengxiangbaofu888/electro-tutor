@@ -91,7 +91,11 @@ export function BookAddPage({ materialId: propId }: { materialId?: string } = {}
     try {
       const vision = await getDefaultLLM('vision');
       setProgress('正在压缩照片…');
-      const { dataUrls, originalBytes, compressedBytes } = await compressImages([file]);
+      const { dataUrls, originalBytes, compressedBytes } = await compressImages([file], {
+        // 书皮只要看清书名/出版社，不需要 1280 那么细：压小一点，识图快很多
+        maxEdge: 1024,
+        quality: 0.8,
+      });
       patch({ coverDataUrl: dataUrls[0] });
 
       if (!vision) {

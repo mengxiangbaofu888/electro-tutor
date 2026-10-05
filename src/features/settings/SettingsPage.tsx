@@ -27,7 +27,7 @@ import type {
 } from '../../lib/db/types';
 import { TRACK_LABELS } from '../../lib/db/types';
 import { PROVIDER_PRESETS, chatCompletionsUrl, isPrivateEndpoint, makeConfig } from '../../lib/llm/presets';
-import { listModels, testConnection } from '../../lib/llm/client';
+import { listModels, looksLikeItSawTheImage, testConnection, testVisionConnection } from '../../lib/llm/client';
 import { refreshLearnerProfile } from '../../lib/services/practice';
 import { exportQuestionsCsv } from '../../lib/services/bank';
 import { saveTextFile } from '../../lib/platform/save-file';
@@ -109,10 +109,33 @@ export function SettingsPage() {
     setBusy('test');
     setMessage(null);
     try {
+      // 识图配置要走**真的发一张图**的测试：只发一句文字是测不出"能不能看图"的，
+      // 而这正是用户踩过的坑——测试连接显示正常，真去识图却一直失败。
+      if (editing.kind === 'vision') {
+        const reply = await testVisionConnection(editing);
+        if (looksLikeItSawTheImage(reply)) {
+          setMessage({ tone: 'ok', text: `识图正常：模型说它看到「${reply}」。` });
+        } else {
+          setMessage({
+            tone: 'warn',
+            text:
+              `模型回话了（「${reply}」），但**它好像没看到图**——多半这个模型不吃图片输入。\n` +
+              '识图请换成真的有视觉能力的模型，例如智谱 GLM 的 glm-4v-flash（有免费档）。',
+          });
+        }
+        return;
+      }
       const reply = await testConnection(editing);
       setMessage({ tone: 'ok', text: `连接成功，模型回复：${reply}` });
     } catch (e) {
-      setMessage({ tone: 'error', text: e instanceof Error ? e.message : String(e) });
+      const msg = e instanceof Error ? e.message : String(e);
+      setMessage({
+        tone: 'error',
+        text:
+          editing.kind === 'vision'
+            ? `${msg}\n（识图测试失败：这个模型多半不支持图片输入。识图建议用智谱 glm-4v-flash。）`
+            : msg,
+      });
     } finally {
       setBusy('');
     }

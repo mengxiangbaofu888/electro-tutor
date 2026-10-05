@@ -11,7 +11,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { LLMConfig } from '../db/types';
-import { chat, listModels, resolveUrl, truncateText } from './client';
+import { chat, listModels, looksLikeItSawTheImage, resolveUrl, testVisionConnection, truncateText } from './client';
 import { chatCompletionsUrl, isPrivateEndpoint, modelsUrl } from './presets';
 
 /* ------------------------------ 替身服务 ------------------------------ */
@@ -173,6 +173,37 @@ describe('空闲超时（以前浏览器那条路完全没有超时，卡住就�
       (e: Error) => e,
     );
     expect((err as Error).message).not.toContain('没有收到任何数据');
+  });
+});
+
+/* ============================== 识图能力测试 ============================== */
+
+describe('验证"这个模型到底能不能看图"', () => {
+  it('真的把测试图发出去了（不是只发一句话）', async () => {
+    handler = respondOk;
+    await testVisionConnection(cfg({ kind: 'vision' }));
+    expect(received).toHaveLength(1);
+    expect(received[0].body).toContain('image_url');
+    expect(received[0].body).toContain('data:image/png;base64,');
+  });
+
+  it('模型答出蓝色/圆形 → 判定它确实看到了图', () => {
+    expect(looksLikeItSawTheImage('底色是蓝色，中间是一个圆形')).toBe(true);
+    expect(looksLikeItSawTheImage('Blue, circle')).toBe(true);
+  });
+
+  it('模型答非所问 → 判定它没看图（多半不吃图片输入）', () => {
+    expect(looksLikeItSawTheImage('抱歉，我无法查看图片')).toBe(false);
+    expect(looksLikeItSawTheImage('')).toBe(false);
+    expect(looksLikeItSawTheImage('这是一个测试')).toBe(false);
+  });
+
+  it('模型不支持图片输入时报错要能冒出来（不能假装成功）', async () => {
+    handler = (_req, res) => {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'model does not support image input' } }));
+    };
+    await expect(testVisionConnection(cfg({ kind: 'vision' }))).rejects.toThrow(/不支持|image/i);
   });
 });
 

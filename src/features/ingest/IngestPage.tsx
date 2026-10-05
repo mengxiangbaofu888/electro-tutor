@@ -195,7 +195,11 @@ export function IngestPage() {
       // 手机照片动辄几 MB，原图直发会让请求体到几十 MB（基本必然失败，还按体积计费）。
       // 先压到长边 1280 再送出去。
       setProgress(`正在压缩 ${list.length} 张图片…`);
-      const { dataUrls, originalBytes, compressedBytes } = await compressImages(list);
+      const { dataUrls, originalBytes, compressedBytes } = await compressImages(list, {
+        // 课件/电路图需要看清细节，长边保持 1280；但质量降一档，上传更快
+        maxEdge: 1280,
+        quality: 0.8,
+      });
       setProgress(
         `图片 ${formatBytes(originalBytes)} → ${formatBytes(compressedBytes)}，正在识别…`,
       );
