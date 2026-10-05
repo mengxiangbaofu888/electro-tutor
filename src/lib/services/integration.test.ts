@@ -804,7 +804,9 @@ describe('边界与容错', () => {
     chatMock.mockImplementation(
       async (_c: unknown, _m: unknown, opts?: { onDelta?: (d: string) => void }) => {
         call += 1;
-        if (call === 1) throw new Error('上游 502');
+        // 第 1 批的**两次尝试**都失败（新逻辑会对失败批次重试一次），
+        // 这样才能测到"某一批彻底失败时，别的批不受影响"。
+        if (call <= 2) throw new Error('上游 502');
         const text = JSON.stringify([
           {
             type: 'judge',
@@ -833,6 +835,60 @@ describe('边界与容错', () => {
     expect(questions).toHaveLength(1); // 第二批的那道题没被丢掉
     expect(warnings.join()).toContain('1 批没能出题');
     expect(warnings.join()).toContain('上游 502');
+  });
+
+  it('某一批第一次回了空内容 → 追加一句更硬的格式要求再要一次（官方建议的补救）', async () => {
+    const materialId = newId();
+    await db.materials.put({
+      id: materialId,
+      title: '材料',
+      sourceType: 'text',
+      content: MATERIAL_TEXT,
+      charCount: MATERIAL_TEXT.length,
+      createdAt: Date.now(),
+    });
+    const { points, outline } = await generateOutline({ materialIds: [materialId], track: 'plc' });
+
+    let call = 0;
+    chatMock.mockClear();
+    chatMock.mockImplementation(
+      async (_c: unknown, m: unknown, opts?: { onDelta?: (d: string) => void }) => {
+        call += 1;
+        if (call === 1) {
+          // 第一次一个字都不给（DeepSeek 的 JSON Output 会这样）
+          return { content: '' };
+        }
+        // 第二次要能看出"追加了更硬的格式要求"
+        const joined = (Array.isArray(m) ? m : [])
+          .map((x) => String((x as { content?: unknown })?.content ?? ''))
+          .join('\n');
+        expect(joined).toContain('上一次没有返回任何内容');
+        const text = JSON.stringify([
+          {
+            type: 'judge',
+            stem: '重试后才出的题',
+            answer: '正确',
+            knowledgePointNames: [points[0].name],
+            explanation: '',
+            difficulty: 2,
+          },
+        ]);
+        opts?.onDelta?.(text);
+        return { content: text };
+      },
+    );
+
+    const questions = await generateQuestions({
+      outlineId: outline.id,
+      track: 'plc',
+      allocation: [{ pointId: points[0].id, count: 3 }],
+      typeMix: [{ type: 'judge', count: 3 }],
+      difficultyMix: '标准',
+    });
+
+    expect(call).toBe(2); // 一次空 + 一次重试
+    expect(questions).toHaveLength(1);
+    expect(questions[0].stem).toBe('重试后才出的题');
   });
 
   it('模型虚构了不存在的知识点名称时，题目仍然入库（只是关联为空）', async () => {

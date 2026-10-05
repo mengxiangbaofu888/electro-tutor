@@ -259,31 +259,50 @@ export async function generateQuestions(
       profile,
     });
 
-    let raw = '';
+    // 每批最多试两次。
+    // 为什么：DeepSeek 官方文档承认 JSON Output **有概率返回空 content**，
+    // 并建议"修改 prompt 以缓解此类问题"。所以第一次空/解析不出来时，
+    // **追加一句更硬的格式要求**再要一次——这是照官方建议做的补救。
     let drafts: QuestionDraft[] = [];
-    try {
-      const result = await chat(config, messages, {
-        jsonMode: true,
-        temperature: 0.7,
-        // 注意别把预算压得太小：推理型模型（DeepSeek 的 deepseek-flash 默认开思考）
-        // 会先把额度花在思维链上，额度不够时 **content 直接是空的**——
-        // 表现就是"模型没有返回合法 JSON（no braces）"。jsonMode 会自动关思考，
-        // 但不同服务商行为不一，所以这里给一个足够的下限。
-        maxTokens: Math.max(4096, 800 + batchCount * 400),
-        onDelta: (delta) => {
-          raw += delta;
-          onProgress?.(delta);
-        },
-      });
-      const text = result.content || raw;
-      drafts = parseArrayLoose<QuestionDraft>(text, '题目');
-    } catch (e) {
-      // 单批失败不把整次尝试毁掉：已经出的题照样留给用户，最后再汇总说明
-      batchFailures.push(`第 ${i + 1} 批：${e instanceof Error ? e.message : String(e)}`);
-      continue;
+    let lastError: unknown = null;
+    for (let attempt = 0; attempt < 2 && !drafts.length; attempt += 1) {
+      let raw = '';
+      const attemptMessages =
+        attempt === 0
+          ? messages
+          : [
+              ...messages,
+              {
+                role: 'user' as const,
+                content:
+                  '上一次没有返回任何内容。请**只**输出那个 JSON 对象本身（以 { 开头、以 } 结尾），' +
+                  '不要任何解释文字、不要 Markdown 代码围栏、不要前后缀。',
+              },
+            ];
+      try {
+        const result = await chat(config, attemptMessages, {
+          jsonMode: true,
+          temperature: 0.7,
+          // 注意别把预算压得太小：推理型模型（DeepSeek 的 deepseek-flash 默认开思考）
+          // 会先把额度花在思维链上，额度不够时 **content 直接是空的**——
+          // 表现就是"模型没有返回合法 JSON（no braces）"。jsonMode 会自动关思考，
+          // 但不同服务商行为不一，所以这里给一个足够的下限。
+          maxTokens: Math.max(4096, 800 + batchCount * 400),
+          onDelta: (delta) => {
+            raw += delta;
+            onProgress?.(delta);
+          },
+        });
+        const text = result.content || raw;
+        drafts = parseArrayLoose<QuestionDraft>(text, '题目');
+      } catch (e) {
+        lastError = e;
+      }
     }
     if (!drafts.length) {
-      batchFailures.push(`第 ${i + 1} 批模型没给出题目`);
+      batchFailures.push(
+        `第 ${i + 1} 批：${lastError instanceof Error ? lastError.message : '模型两次都没有给出题目'}`,
+      );
       continue;
     }
     collectDrafts(drafts, { outlineId, allPoints, questions, skippedReasons });
