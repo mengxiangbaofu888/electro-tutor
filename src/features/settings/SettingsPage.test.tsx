@@ -84,7 +84,7 @@ describe('模型配置：用户要能自己填 Key、自己选模型', () => {
 
     await waitFor(() => expect(listModelsMock).toHaveBeenCalledTimes(1));
     // 拉回来的模型要出现在"服务商返回 N 个模型"那一块里（那边才是联网结果）
-    const block = (await screen.findByText(/服务商返回 2 个模型/)).parentElement as HTMLElement;
+    const block = (await screen.findByText(/服务商当前可用的 2 个模型/)).parentElement as HTMLElement;
     expect(within(block).getByText('deepseek-chat')).toBeTruthy();
     expect(within(block).getByText('deepseek-reasoner')).toBeTruthy();
   });
@@ -96,7 +96,7 @@ describe('模型配置：用户要能自己填 Key、自己选模型', () => {
     fireEvent.change(keyInput, { target: { value: 'sk-test-123' } });
     fireEvent.blur(keyInput);
 
-    const block = (await screen.findByText(/服务商返回 2 个模型/)).parentElement as HTMLElement;
+    const block = (await screen.findByText(/服务商当前可用的 2 个模型/)).parentElement as HTMLElement;
     fireEvent.click(within(block).getByText('deepseek-reasoner'));
 
     // "当前已选"要跟着变成点过的那个

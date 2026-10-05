@@ -9,8 +9,8 @@
  * 界面上刻意把"手动填"放在同等位置：识图和扫码都会出错，
  * 用户必须能直接改，而不是被迫接受一个错的书名。
  */
-import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import { db, getDefaultLLM, newId } from '../../lib/db/db';
 import type { BookMeta, Material, MicroLesson, TrackId } from '../../lib/db/types';
 import { TRACK_LABELS } from '../../lib/db/types';
@@ -36,8 +36,18 @@ const TRACK_OPTIONS = (Object.keys(TRACK_LABELS) as TrackId[]).map((k) => ({
   label: TRACK_LABELS[k],
 }));
 
-export function BookAddPage() {
+/** 一次最多扫多少张（用户实测会一次选上百张，这里不再卡在 12 张） */
+const MAX_SCAN_BATCH = 100;
+/** 一批扫描的总时限：到点就停下来汇报，让用户再点一次继续（而不是让界面卡死） */
+const SCAN_TOTAL_BUDGET_MS = 150_000;
+/** 单张的时间上限：批量场景用小的，免得个别难解的照片拖住整批 */
+const SCAN_PER_IMAGE_BUDGET_MS = 3_000;
+
+export function BookAddPage({ materialId: propId }: { materialId?: string } = {}) {
   const navigate = useNavigate();
+  const params = useParams();
+  /** 有 id = 在编辑一本已存在的教材（比如回头补充微课），没有 = 新建一本 */
+  const materialId = propId ?? params.materialId;
   const [meta, setMeta] = useState<BookMeta>({ bookTitle: '' });
   const [track, setTrack] = useState<TrackId>('fundamental');
   const [busy, setBusy] = useState('');
@@ -47,8 +57,31 @@ export function BookAddPage() {
   );
   /** 手动加微课时用的一行输入 */
   const [manualUrl, setManualUrl] = useState('');
+  /** 正在编辑的那条材料的创建时间（更新时保留，不改成"今天新建"） */
+  const [createdAt, setCreatedAt] = useState<number | null>(null);
 
   const patch = (p: Partial<BookMeta>) => setMeta((prev) => ({ ...prev, ...p }));
+
+  /* ------------------------------ 编辑已有教材 ------------------------------ */
+
+  useEffect(() => {
+    if (!materialId) return;
+    let alive = true;
+    void (async () => {
+      const row = await db.materials.get(materialId);
+      if (!alive || !row) return;
+      setMeta(row.book ?? { bookTitle: row.title });
+      setTrack(row.track ?? 'fundamental');
+      setCreatedAt(row.createdAt);
+      setMessage({
+        tone: 'ok',
+        text: `正在补充/编辑《${row.book?.bookTitle || row.title}》。把漏掉的微课二维码拍进来，保存后会更新这一本（不会新建一条）。`,
+      });
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [materialId]);
 
   /* ------------------------------ ① 拍书皮 ------------------------------ */
 
@@ -100,7 +133,9 @@ export function BookAddPage() {
   /* ------------------------------ ② 扫码（条码 / 二维码） ------------------------------ */
 
   async function handleScan(files: FileList) {
-    const list = Array.from(files).slice(0, 12);
+    // 用户可以一次选很多张（实测有人一次选上百张）。这里不再切到 12 张，
+    // 但**必须有总时限**：否则上百张、每张最坏几秒，用户会以为死机了。
+    const list = Array.from(files).slice(0, MAX_SCAN_BATCH);
     if (!list.length) return;
     setMessage(null);
     setBusy('scan');
@@ -109,24 +144,38 @@ export function BookAddPage() {
     let isbn: string | undefined;
     let unknown = 0;
     let failed = 0;
+    let processed = 0;
+    const deadline = Date.now() + SCAN_TOTAL_BUDGET_MS;
 
     try {
       for (let i = 0; i < list.length; i++) {
-        setProgress(`正在解码第 ${i + 1} / ${list.length} 张…`);
+        if (Date.now() > deadline) {
+          setMessage({
+            tone: 'warn',
+            text:
+              `已处理 ${processed} 张（找到 ${found.length} 个微课链接` +
+              (isbn ? `、ISBN ${formatIsbnSafe(isbn)}` : '') +
+              `）。为免卡太久先停一下——**再点一次可以继续扫剩下的 ${list.length - i} 张**。` +
+              '小技巧：一张只拍一个码、靠近一点，扫得又快又准。',
+          });
+          return;
+        }
+        setProgress(`正在解码第 ${i + 1} / ${list.length} 张…（已找到 ${found.length} 个微课链接）`);
         let hit = null;
         try {
-          // 整张找不到时，解码器会回调把阶段切到"切块细找"——
-          // 这一步可能要几秒（实测拍整张封底要 7 秒），必须让用户知道它在干活。
+          // 批量场景下给每张较小的预算，避免个别照片把整批拖住
           hit = await decodeImageFile(list[i], (phase) => {
             if (phase === 'tiles') {
               setProgress(
-                `第 ${i + 1} / ${list.length} 张：整张没找到，正在切块放大细找（最多几秒）…`,
+                `第 ${i + 1} / ${list.length} 张：整张没找到，正在切块放大细找…（已找到 ${found.length} 个）`,
               );
             }
-          });
+          }, SCAN_PER_IMAGE_BUDGET_MS);
         } catch {
           failed += 1;
           continue;
+        } finally {
+          processed += 1;
         }
         if (!hit) {
           failed += 1;
@@ -286,23 +335,28 @@ export function BookAddPage() {
     }
     setBusy('save');
     try {
+      const content = buildBookContent(meta);
+      const editingExisting = Boolean(materialId && createdAt !== null);
       const row: Material = {
-        id: newId(),
+        // 编辑已有教材时**保留原 id 和创建时间**：这是"补充"，不是新建一本
+        id: editingExisting ? (materialId as string) : newId(),
         title: meta.bookTitle.trim(),
         sourceType: 'book',
         sourceRef: meta.isbn ? `ISBN ${meta.isbn}` : undefined,
-        content: buildBookContent(meta),
-        charCount: buildBookContent(meta).length,
+        content,
+        charCount: content.length,
         track,
-        createdAt: Date.now(),
+        createdAt: editingExisting ? (createdAt as number) : Date.now(),
         book: { ...meta, updatedAt: Date.now() },
       };
       await db.materials.put(row);
       setMessage({
         tone: 'ok',
-        text: '这本教材已存进「材料」。接下来可以去「大纲」页用它生成知识大纲，或者直接去「练习」出题。',
+        text: editingExisting
+          ? `已更新《${row.title}》，现在有 ${meta.microLessons?.length ?? 0} 个微课链接。`
+          : '这本教材已存进「材料」。接下来可以去「大纲」页用它生成知识大纲，或者直接去「练习」出题。',
       });
-      setTimeout(() => navigate('/outlines'), 1200);
+      if (!editingExisting) setTimeout(() => navigate('/outlines'), 1200);
     } catch (e) {
       setMessage({ tone: 'error', text: e instanceof Error ? e.message : String(e) });
     } finally {
@@ -503,7 +557,7 @@ export function BookAddPage() {
 
       <div className="btn-row">
         <Button variant="primary" loading={busy === 'save'} onClick={save}>
-          保存这本教材
+          {materialId && createdAt !== null ? '保存修改（补充微课）' : '保存这本教材'}
         </Button>
         <Button variant="ghost" onClick={() => navigate('/materials')}>
           返回材料页

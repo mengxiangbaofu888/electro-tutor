@@ -61,6 +61,7 @@ export default function App() {
           <Route path="/" element={<HomePage />} />
           <Route path="/materials" element={<IngestPage />} />
           <Route path="/book" element={<BookAddPage />} />
+          <Route path="/book/:materialId" element={<BookAddPage />} />
           <Route path="/mooc" element={<MoocImportPage />} />
           <Route path="/outlines" element={<OutlineListPage />} />
           <Route path="/outlines/:outlineId" element={<OutlineDetailPage />} />

@@ -32,7 +32,24 @@ export interface ChatOptions {
   jsonMode?: boolean;
   temperature?: number;
   maxTokens?: number;
+  /**
+   * **空闲超时**（毫秒）：多久没有收到任何数据就放弃。
+   *
+   * 为什么必须有这个：以前浏览器那条路**没有超时**——模型名填错、服务商排队、
+   * 网络半死的时候，请求会一直挂着，界面上就是"半天出不来"，
+   * 用户完全不知道发生了什么。原生通道虽然有个 3 分钟的 readTimeout，
+   * 但对使用者来说同样是"干等"。
+   *
+   * 用"空闲"而不是"总时长"：长文本生成本来就要几十秒，
+   * 只要还在持续吐字就不该被打断；真正该掐掉的是"长时间一点动静都没有"。
+   */
+  idleTimeoutMs?: number;
 }
+
+/** 默认空闲超时：45 秒没有任何数据就判定为卡住 */
+export const DEFAULT_IDLE_TIMEOUT_MS = 45_000;
+/** 识图/长文这类请求本身更慢，给更宽的空闲上限 */
+export const VISION_IDLE_TIMEOUT_MS = 90_000;
 
 export interface ChatResult {
   content: string;
@@ -165,6 +182,10 @@ export async function chat(
   };
   const payload = buildBody(config, messages, opts, streaming);
 
+  const idleMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+  /** 出错时用这个把"哪家、哪个模型"说清楚，不然用户只能干瞪眼 */
+  const where = `${config.model || '(未填模型)'} @ ${hostOf(config.baseUrl)}`;
+
   const native = getNativeHttp();
   if (native) {
     // 原生壳：一次性拿回结果（原生流式实现复杂，收益有限，暂不做）
@@ -175,10 +196,18 @@ export async function chat(
         method: 'POST',
         headers,
         data: payload,
-        readTimeout: 180_000,
-        connectTimeout: 30_000,
+        // 原生通道只有读超时；按空闲超时 + 一点余量，别再挂 3 分钟
+        readTimeout: idleMs + 30_000,
+        connectTimeout: 20_000,
       });
     } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/timeout|timed out|超时/i.test(msg)) {
+        throw new Error(
+          `等 ${Math.round((idleMs + 30_000) / 1000)} 秒还没有回应（${where}）。` +
+            '可能是模型名不对、服务商在排队、或者网络不通。建议：到「我的 → 模型配置」点「从服务商获取模型列表」重新选一个模型，再点「测试连接」确认。',
+        );
+      }
       throw new Error(describeNetworkError(e, config));
     }
     if (res.status < 200 || res.status >= 300) {
@@ -189,30 +218,64 @@ export async function chat(
     return { content: text };
   }
 
+  // 浏览器通路：自己实现空闲超时（以前这里完全没有超时，卡住就是永远卡住）
+  const ctrl = new AbortController();
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const touch = () => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timedOut = true;
+      ctrl.abort();
+    }, idleMs);
+  };
+  const clear = () => {
+    if (timer) clearTimeout(timer);
+    timer = undefined;
+  };
+  const onOuterAbort = () => ctrl.abort();
+  opts.signal?.addEventListener('abort', onOuterAbort);
+  touch();
+
+  const netError = (e: unknown): Error => {
+    if (timedOut) {
+      return new Error(
+        `等 ${Math.round(idleMs / 1000)} 秒没有收到任何数据（${where}）。` +
+          '可能是模型名不对、服务商在排队、或者网络不通。建议：到「我的 → 模型配置」点「从服务商获取模型列表」重新选一个模型，再点「测试连接」确认。',
+      );
+    }
+    return new Error(describeNetworkError(e, config));
+  };
+
   let res: Response;
   try {
     res = await fetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify(payload),
-      signal: opts.signal,
+      signal: ctrl.signal,
     });
   } catch (e) {
     // jsonMode 不被支持时，服务端可能直接拒绝，这里兜底重试一次不带 response_format
-    if (opts.jsonMode && !streaming) {
+    if (opts.jsonMode && !streaming && !timedOut) {
       const retryPayload = buildBody(config, messages, { ...opts, jsonMode: false }, false);
       try {
+        touch();
         res = await fetch(url, {
           method: 'POST',
           headers,
           body: JSON.stringify(retryPayload),
-          signal: opts.signal,
+          signal: ctrl.signal,
         });
       } catch (e2) {
-        throw new Error(describeNetworkError(e2, config));
+        clear();
+        opts.signal?.removeEventListener('abort', onOuterAbort);
+        throw netError(e2);
       }
     } else {
-      throw new Error(describeNetworkError(e, config));
+      clear();
+      opts.signal?.removeEventListener('abort', onOuterAbort);
+      throw netError(e);
     }
   }
 
@@ -220,24 +283,46 @@ export async function chat(
     let bodyText = await readErrorBody(res);
     // 有些服务商不支持 response_format，去掉后重试一次
     if (opts.jsonMode && (res.status === 400 || res.status === 422)) {
+      touch();
       const retry = await fetch(url, {
         method: 'POST',
         headers,
         body: JSON.stringify(buildBody(config, messages, { ...opts, jsonMode: false }, false)),
-        signal: opts.signal,
+        signal: ctrl.signal,
       });
-      if (retry.ok) return finalize(await retry.json(), opts);
+      if (retry.ok) {
+        clear();
+        opts.signal?.removeEventListener('abort', onOuterAbort);
+        return finalize(await retry.json(), opts);
+      }
       bodyText = await readErrorBody(retry);
     }
+    clear();
+    opts.signal?.removeEventListener('abort', onOuterAbort);
     throw new Error(describeHttpError(res.status, bodyText));
   }
 
-  if (streaming && res.body) {
-    return streamResponse(res, opts);
+  try {
+    if (streaming && res.body) {
+      return await streamResponse(res, opts, touch);
+    }
+    const json = (await res.json()) as unknown;
+    return finalize(json, opts);
+  } catch (e) {
+    throw netError(e);
+  } finally {
+    clear();
+    opts.signal?.removeEventListener('abort', onOuterAbort);
   }
+}
 
-  const json = (await res.json()) as unknown;
-  return finalize(json, opts);
+/** 从接口地址里取出主机名，用于错误提示（让用户知道打到了哪里） */
+function hostOf(baseUrl: string): string {
+  try {
+    return new URL(baseUrl.trim()).host;
+  } catch {
+    return baseUrl.trim() || '(未填地址)';
+  }
 }
 
 /** 从非流式响应里取正文与用量 */
@@ -274,7 +359,11 @@ function extractUsage(json: unknown): ChatResult['usage'] {
 }
 
 /** 解析 SSE 流。若服务端其实返回的是普通 JSON（无视了 stream:true），自动退回普通解析。 */
-async function streamResponse(res: Response, opts: ChatOptions): Promise<ChatResult> {
+async function streamResponse(
+  res: Response,
+  opts: ChatOptions,
+  touch?: () => void,
+): Promise<ChatResult> {
   const reader = res.body!.getReader();
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
@@ -284,6 +373,8 @@ async function streamResponse(res: Response, opts: ChatOptions): Promise<ChatRes
 
   for (;;) {
     const { done, value } = await reader.read();
+    // 每收到一块数据就把空闲计时器重置：只要还在吐字就不算卡住
+    touch?.();
     if (done) break;
     const chunk = decoder.decode(value, { stream: true });
     rawAll += chunk;
@@ -363,7 +454,9 @@ export async function visionExtract(
       },
       { role: 'user', content },
     ],
-    { ...opts, temperature: opts.temperature ?? 0.2 },
+    // 识图本身比纯文本慢（图片要上传、模型要多看一轮），所以给更宽的空闲上限；
+    // 但仍然要有上限——没有上限时用户看到的就是"点了一下然后一直转圈"。
+    { ...opts, temperature: opts.temperature ?? 0.2, idleTimeoutMs: opts.idleTimeoutMs ?? VISION_IDLE_TIMEOUT_MS },
   );
   return result.content;
 }
@@ -403,11 +496,12 @@ function pickModelIds(json: unknown): string[] {
   return [];
 }
 
-/** 发一句最短的话验证配置是否可用 */
+/** 发一句最短的话验证配置是否可用（故意给短超时：用户要的是立刻知道通不通） */
 export async function testConnection(config: LLMConfig): Promise<string> {
   const res = await chat(config, [{ role: 'user', content: '回复两个字：正常' }], {
     temperature: 0,
     maxTokens: 16,
+    idleTimeoutMs: 20_000,
   });
   return res.content.trim() || '(模型返回为空)';
 }

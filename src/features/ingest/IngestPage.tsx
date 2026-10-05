@@ -436,9 +436,16 @@ export function IngestPage() {
                       </div>
                     </div>
                   </label>
-                  <Button size="sm" variant="danger" onClick={() => removeMaterial(m.id)}>
-                    删除
-                  </Button>
+                  <div className="col" style={{ gap: 4 }}>
+                    {m.sourceType === 'book' && (
+                      <Button size="sm" variant="ghost" onClick={() => navigate(`/book/${m.id}`)}>
+                        补充微课 / 编辑
+                      </Button>
+                    )}
+                    <Button size="sm" variant="danger" onClick={() => removeMaterial(m.id)}>
+                      删除
+                    </Button>
+                  </div>
                 </div>
                 {m.warnings?.length ? (
                   <div className="small faint" style={{ marginTop: 6 }}>

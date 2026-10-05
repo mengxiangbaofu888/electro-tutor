@@ -242,18 +242,6 @@ export function SettingsPage() {
   const textConfigs = configs.filter((c) => c.kind === 'text');
   const visionConfigs = configs.filter((c) => c.kind === 'vision');
 
-  // 当前接口地址如果对得上某个预设服务商，就把它的常用模型列出来做快捷标签。
-  // 只是"方便点一下"，不强制——模型最终由用户自己决定。
-  const presetModelChoices = (() => {
-    if (!editing) return [];
-    const want = editing.baseUrl.trim().replace(/\/+$/, '');
-    const hit = Object.values(PROVIDER_PRESETS).find(
-      (p) => p.baseUrl && p.baseUrl.replace(/\/+$/, '') === want,
-    );
-    if (!hit) return [];
-    return editing.kind === 'vision' ? hit.visionModels : hit.textModels;
-  })();
-
   return (
     <>
       {message && <Alert tone={message.tone === 'warn' ? 'warn' : message.tone}>{message.text}</Alert>}
@@ -503,10 +491,10 @@ export function SettingsPage() {
                 </Alert>
               )}
 
-            <Field label="③ 模型（你自己选）" hint="点一下标签就是选中它；也能自己手填模型 ID。">
+            <Field label="③ 模型（你自己选）" hint="点「从服务商获取模型列表」联网拉取，或直接手填模型 ID。">
               <TextInput
                 value={editing.model}
-                placeholder="点下面的标签选，或先点「获取模型列表」"
+                placeholder="先点下面的「获取模型列表」，再从结果里选"
                 onChange={(v) => setEditing({ ...editing, model: v })}
               />
             </Field>
@@ -514,21 +502,13 @@ export function SettingsPage() {
               当前已选：<b>{editing.model || '（还没选）'}</b>
             </div>
 
-            {presetModelChoices.length > 0 && (
-              <div className="row wrap" style={{ marginBottom: 10 }}>
-                <span className="small faint">常用：</span>
-                {presetModelChoices.map((m) => (
-                  <button
-                    key={m}
-                    className={`badge${editing.model === m ? ' primary' : ''}`}
-                    style={{ border: 'none', cursor: 'pointer' }}
-                    onClick={() => setEditing({ ...editing, model: m })}
-                  >
-                    {m}
-                  </button>
-                ))}
-              </div>
-            )}
+            {editing.kind === 'vision' &&
+              /deepseek\.com/i.test(editing.baseUrl) && (
+                <Alert tone="warn">
+                  DeepSeek **没有视觉模型**，用它识图不会成功（要么报错、要么一直没响应）。
+                  识图请换一家：智谱 GLM 的 <b>glm-4v-flash</b> 有免费档，最合适。
+                </Alert>
+              )}
 
             <div className="btn-row" style={{ marginBottom: 10 }}>
               <Button loading={busy === 'models'} disabled={!editing.apiKey.trim()} onClick={doListModels}>
@@ -539,7 +519,8 @@ export function SettingsPage() {
             {modelList.length > 0 && (
               <div style={{ marginBottom: 12 }}>
                 <div className="small faint" style={{ marginBottom: 6 }}>
-                  服务商返回 {modelList.length} 个模型，点一下选用：
+                  服务商当前可用的 {modelList.length} 个模型，点一下选用（这份列表是**刚联网拉到的**，
+                  不是 App 里写死的）：
                 </div>
                 <div className="row wrap">
                   {modelList.map((m) => (

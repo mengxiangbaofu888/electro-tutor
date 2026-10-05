@@ -207,6 +207,63 @@ describe('加教材：拍书皮 → 核对 → 扫码 → 保存', () => {
   });
 });
 
+describe('补充添加微课（加完书之后回头补漏的）', () => {
+  it('带着已有教材的 id 打开：载入这本书，保存是"更新"而不是新建', async () => {
+    // 先造一本已经存在的教材，里面已经有 1 个微课
+    const existingId = 'book-existing';
+    await db.materials.put({
+      id: existingId,
+      title: '电工技术（第3版）',
+      sourceType: 'book',
+      content: '# 电工技术（第3版）',
+      charCount: 12,
+      track: 'plc',
+      createdAt: 111,
+      book: {
+        bookTitle: '电工技术（第3版）',
+        publisher: '机械工业出版社',
+        microLessons: [
+          { id: 'm1', url: 'https://x.com/micro/1', title: '第1节', addedAt: 1 },
+        ],
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <BookAddPage materialId={existingId} />
+      </MemoryRouter>,
+    );
+
+    // 书名要从已存的书里带出来，并明确告诉用户这是"补充"
+    await waitFor(() => {
+      const title = screen.getByPlaceholderText('例如：电工技术（第3版）') as HTMLInputElement;
+      expect(title.value).toBe('电工技术（第3版）');
+    });
+    expect(await screen.findByText(/正在补充\/编辑/)).toBeTruthy();
+    // 已有的微课要显示出来，才知道漏了哪些
+    expect(screen.getByText('https://x.com/micro/1')).toBeTruthy();
+    // 按钮变成"保存修改"
+    const saveBtn = screen.getByText('保存修改（补充微课）');
+
+    // 再补一个微课，然后保存
+    const input = screen.getByPlaceholderText('https://…') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'https://x.com/micro/2' } });
+    fireEvent.click(screen.getByText('加入'));
+    await screen.findByText('https://x.com/micro/2');
+
+    fireEvent.click(saveBtn);
+    await waitFor(async () => expect(await db.materials.count()).toBe(1));
+    const row = await db.materials.get(existingId);
+    expect(row?.book?.microLessons?.map((m) => m.url).sort()).toEqual([
+      'https://x.com/micro/1',
+      'https://x.com/micro/2',
+    ]);
+    // 创建时间不能被改成"今天"，这是补充不是新建
+    expect(row?.createdAt).toBe(111);
+    expect(row?.track).toBe('plc');
+  });
+});
+
 describe('让 App 自己去把微课内容抓下来（用户要的是软件自己找到内容）', () => {
   /** 往微课清单里加一个链接 */
   async function addMicroLesson(url: string) {

@@ -113,6 +113,69 @@ async function deadPort(): Promise<number> {
   return p;
 }
 
+/* ============================== 空闲超时 ============================== */
+
+describe('空闲超时（以前浏览器那条路完全没有超时，卡住就是永远卡住）', () => {
+  it('服务端一直不回：到点就放弃，并说清是哪个模型、打到哪家', async () => {
+    // 挂着一个永不响应的请求，模拟"模型名不对/服务商排队/网络半死"
+    handler = () => {
+      /* 故意什么都不做 */
+    };
+    const t0 = Date.now();
+    const err = await chat(cfg(), userMsg, { idleTimeoutMs: 300 }).catch((e: Error) => e);
+    const spent = Date.now() - t0;
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain('没有收到任何数据');
+    // 用户得知道"打到了谁"，不然只能干瞪眼
+    expect((err as Error).message).toContain('test-model');
+    expect((err as Error).message).toContain('127.0.0.1');
+    // 而且真的会放弃，不是等满 45 秒
+    expect(spent).toBeLessThan(3000);
+  });
+
+  it('模型名/地址的提示要能直接照做（引导去看模型列表和测试连接）', async () => {
+    handler = () => {};
+    const err = await chat(cfg(), userMsg, { idleTimeoutMs: 200 }).catch((e: Error) => e);
+    expect((err as Error).message).toContain('获取模型列表');
+    expect((err as Error).message).toContain('测试连接');
+  });
+
+  it('流式慢慢吐字不会被误杀（按"空闲"而不是"总时长"判定）', async () => {
+    handler = (_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      let n = 0;
+      const timer = setInterval(() => {
+        n += 1;
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: '字' } }] })}\n\n`);
+        if (n >= 6) {
+          clearInterval(timer);
+          res.write('data: [DONE]\n\n');
+          res.end();
+        }
+      }, 80);
+    };
+    const chunks: string[] = [];
+    // 每次间隔 80ms，空闲上限 200ms：整段耗时约 480ms > 200ms，
+    // 但因为没有一次空闲超过 200ms，所以必须成功拿到全部内容。
+    const r = await chat(cfg(), userMsg, {
+      idleTimeoutMs: 200,
+      onDelta: (c) => chunks.push(c),
+    });
+    expect(r.content).toBe('字字字字字字');
+    expect(chunks).toHaveLength(6);
+  });
+
+  it('调用方自己取消（signal）不会被误报成超时', async () => {
+    handler = () => {};
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), 100);
+    const err = await chat(cfg(), userMsg, { idleTimeoutMs: 5000, signal: ctrl.signal }).catch(
+      (e: Error) => e,
+    );
+    expect((err as Error).message).not.toContain('没有收到任何数据');
+  });
+});
+
 /* ============================== 请求拼装 ============================== */
 
 describe('请求拼装', () => {

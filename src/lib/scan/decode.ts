@@ -365,6 +365,7 @@ function fileToDataUrl(file: Blob): Promise<string> {
 export async function decodeDataUrl(
   dataUrl: string,
   onPhase?: (phase: 'full' | 'tiles') => void,
+  timeBudgetMs?: number,
 ): Promise<ScanCode | null> {
   const img = await loadImage(dataUrl);
   const width = img.naturalWidth || img.width;
@@ -377,13 +378,21 @@ export async function decodeDataUrl(
   if (!ctx) return null;
   ctx.drawImage(img, 0, 0);
   const pixels = ctx.getImageData(0, 0, width, height);
-  return decodeLuminance(rgbaToLuminance(pixels.data, width, height), width, height, { onPhase });
+  return decodeLuminance(rgbaToLuminance(pixels.data, width, height), width, height, {
+    onPhase,
+    timeBudgetMs,
+  });
 }
 
-/** 解一个图片文件（用户拍的或选的）；onPhase 用来告诉界面"正在切块细找" */
+/**
+ * 解一个图片文件（用户拍的或选的）。
+ * @param onPhase 用来告诉界面"正在切块细找"
+ * @param timeBudgetMs 单张的时间上限；批量扫很多张时给个小一点的值，免得个别照片拖住整批
+ */
 export async function decodeImageFile(
   file: Blob,
   onPhase?: (phase: 'full' | 'tiles') => void,
+  timeBudgetMs?: number,
 ): Promise<ScanCode | null> {
-  return decodeDataUrl(await fileToDataUrl(file), onPhase);
+  return decodeDataUrl(await fileToDataUrl(file), onPhase, timeBudgetMs);
 }
