@@ -1,17 +1,21 @@
 /**
  * 答题页：做题 + 交卷批改。
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { db } from '../../lib/db/db';
-import type { AnswerRecord, Attempt, Paper, Question } from '../../lib/db/types';
+import { db, patchAnswer } from '../../lib/db/db';
+import type { Attempt, Paper, Question } from '../../lib/db/types';
 import { QUESTION_TYPE_LABELS, isObjective } from '../../lib/db/types';
-import { finishAttempt, gradeOne, toAnswerArray } from '../../lib/services/grade';
+import { finishAttempt, gradeOne } from '../../lib/services/grade';
 import { recordAttempt } from '../../lib/services/practice';
+import { loadDraftAnswers, saveDraftAnswers } from '../../lib/services/exam-draft';
 import { Alert, Badge, Button, Card, Loading, Sheet } from '../../components/ui';
 
 /** 学生作答的中间态：统一用字符串数组存 */
 type Draft = Record<string, string[]>;
+
+/** 草稿自动保存的防抖时长（毫秒） */
+const AUTOSAVE_DELAY = 700;
 
 function blankCount(q: Question): number {
   if (q.type !== 'blank') return 1;
@@ -31,6 +35,17 @@ export function ExamPage() {
   const [progress, setProgress] = useState('');
   const [error, setError] = useState('');
   const [elapsed, setElapsed] = useState(0);
+  const [savedAt, setSavedAt] = useState(0);
+  const [timeUp, setTimeUp] = useState(false);
+
+  // 草稿自动保存。手机上随时可能切走、锁屏或被系统回收，
+  // 答案不能只活在内存里。
+  const draftRef = useRef<Draft>({});
+  const dirty = useRef<Set<string>>(new Set());
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 交卷开始后不再回写草稿，否则草稿会把批改结果覆盖掉
+  const submitted = useRef(false);
+  const autoSubmitted = useRef(false);
 
   const load = useCallback(async () => {
     const a = await db.attempts.get(attemptId);
@@ -44,12 +59,9 @@ export function ExamPage() {
     if (p) {
       const qs = (await db.questions.bulkGet(p.questionIds)).filter(Boolean) as Question[];
       setQuestions(qs);
-      // 恢复已有草稿
-      const restored: Draft = {};
-      for (const q of qs) {
-        const rec = a.answers.find((x) => x.questionId === q.id);
-        if (rec) restored[q.id] = toAnswerArray(rec.userAnswer);
-      }
+      // 恢复上次的草稿（也可能是上次交卷失败时留下的部分批改结果）
+      const restored = await loadDraftAnswers(a.id);
+      draftRef.current = restored;
       setDraft(restored);
     }
   }, [attemptId]);
@@ -68,6 +80,41 @@ export function ExamPage() {
     if (attempt?.finishedAt) navigate(`/report/${attempt.id}`, { replace: true });
   }, [attempt, navigate]);
 
+  /** 把攒下的草稿写进数据库 */
+  const flushDrafts = useCallback(async () => {
+    if (!attempt || submitted.current) return;
+    const ids = [...dirty.current];
+    if (!ids.length) return;
+    const payload: Record<string, string[]> = {};
+    for (const qid of ids) payload[qid] = draftRef.current[qid] ?? [];
+    try {
+      await saveDraftAnswers(attempt.id, payload);
+      // 写入成功才清脏标记；期间新产生的修改不会被误删
+      for (const qid of ids) dirty.current.delete(qid);
+      setSavedAt(Date.now());
+    } catch {
+      // 写库失败就保留脏标记，等下一次编辑或离开页面时重试，避免静默丢答案
+    }
+  }, [attempt]);
+
+  // 离开页面或切到后台时立刻落盘，不等防抖
+  useEffect(() => {
+    const flush = () => {
+      void flushDrafts();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') flush();
+    };
+    window.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      document.removeEventListener('visibilitychange', onVisibility);
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      flush();
+    };
+  }, [flushDrafts]);
+
   const current = questions[index];
   const answeredCount = useMemo(
     () => questions.filter((q) => (draft[q.id] ?? []).some((v) => v.trim())).length,
@@ -75,47 +122,73 @@ export function ExamPage() {
   );
 
   function setAnswer(qid: string, values: string[]) {
-    setDraft((prev) => ({ ...prev, [qid]: values }));
+    draftRef.current = { ...draftRef.current, [qid]: values };
+    setDraft(draftRef.current);
+    dirty.current.add(qid);
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      void flushDrafts();
+    }, AUTOSAVE_DELAY);
   }
 
-  async function submit() {
+  async function submit(force = false) {
     if (!attempt) return;
-    const unanswered = questions.length - answeredCount;
-    if (unanswered > 0 && !confirm(`还有 ${unanswered} 道题没做，确定交卷吗？`)) return;
+    if (!force) {
+      const unanswered = questions.length - answeredCount;
+      if (unanswered > 0 && !confirm(`还有 ${unanswered} 道题没做，确定交卷吗？`)) return;
+    }
 
     setBusy(true);
     setError('');
-    const records: AnswerRecord[] = [];
     try {
+      // 先把草稿全部落盘，再开始批改；批改结果用「合并写入」，
+      // 所以半途失败也不会把没批改到的题弄丢。
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      await flushDrafts();
+      submitted.current = true;
+
       for (let i = 0; i < questions.length; i += 1) {
         const q = questions[i];
-        const answer = draft[q.id] ?? [];
+        const answer = draftRef.current[q.id] ?? [];
         setProgress(`正在批改 ${i + 1}/${questions.length}：${QUESTION_TYPE_LABELS[q.type]}`);
         const rec = await gradeOne(q, answer.filter((v) => v !== undefined));
-        records.push(rec);
-        // 边批边存，避免中途失败全丢
-        await db.attempts.update(attempt.id, { answers: [...records] });
+        await patchAnswer(attempt.id, rec);
       }
+
       setProgress('正在生成学习报告…');
-      await db.attempts.update(attempt.id, { answers: records });
       const { attempt: finished } = await finishAttempt({
         attemptId: attempt.id,
         onProgress: () => setProgress('正在生成学习报告…'),
       });
-      // 写入自进化引擎
-      const paperRow = await db.papers.get(finished.paperId);
-      if (paperRow) {
-        await recordAttempt(finished, questions);
-        await db.papers.update(paperRow.id, {}); // 触发一次写入，保证索引同步
-      }
+      // 写入自进化引擎：掌握度、错题本、复习排程
+      await recordAttempt(finished, questions);
       navigate(`/report/${finished.id}`, { replace: true });
     } catch (e) {
-      setError(`交卷过程中出错：${e instanceof Error ? e.message : String(e)}。已批改的部分已保存，可以再点一次交卷。`);
+      // 放开 submitted，允许重试；此时未批改的题仍保留着草稿答案
+      submitted.current = false;
+      setError(
+        `交卷过程中出错：${e instanceof Error ? e.message : String(e)}。` +
+          '已批改的部分已保存，可以再点一次「交卷批改」继续。',
+      );
     } finally {
       setBusy(false);
       setProgress('');
     }
   }
+
+  // 限时卷时间到自动交卷
+  useEffect(() => {
+    if (!paper?.durationMin || submitted.current) return;
+    if (elapsed >= paper.durationMin * 60) setTimeUp(true);
+  }, [elapsed, paper]);
+
+  useEffect(() => {
+    if (!timeUp || autoSubmitted.current) return;
+    autoSubmitted.current = true;
+    void submit(true);
+    // submit 每次渲染都会重建，这里只需要在 timeUp 翻转时触发一次
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timeUp]);
 
   if (error && !questions.length) return <Alert tone="error">{error}</Alert>;
   if (!attempt || !paper) return <Loading />;
@@ -128,6 +201,7 @@ export function ExamPage() {
   return (
     <>
       {error && <Alert tone="error">{error}</Alert>}
+      {timeUp && <Alert tone="warn">⏰ 时间到，正在自动交卷…</Alert>}
 
       <Card className="tight">
         <div className="row between">
@@ -135,6 +209,7 @@ export function ExamPage() {
             <div className="small truncate">{paper.title}</div>
             <div className="small faint">
               已答 {answeredCount}/{questions.length} · 用时 {timeText}
+              {savedAt > 0 && !busy && ' · 已自动保存'}
             </div>
           </div>
           <Button size="sm" variant="ghost" onClick={() => setSheetOpen(true)}>
@@ -278,7 +353,7 @@ export function ExamPage() {
             下一题 ›
           </Button>
         ) : (
-          <Button variant="accent" block loading={busy} onClick={submit}>
+          <Button variant="accent" block loading={busy} onClick={() => submit()}>
             交卷批改
           </Button>
         )}
@@ -286,7 +361,7 @@ export function ExamPage() {
 
       {index === questions.length - 1 && !busy && (
         <div style={{ marginTop: 10 }}>
-          <Button variant="accent" block loading={busy} onClick={submit}>
+          <Button variant="accent" block loading={busy} onClick={() => submit()}>
             ✅ 交卷并批改（还有 {questions.length - answeredCount} 题未答）
           </Button>
         </div>
