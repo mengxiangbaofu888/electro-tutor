@@ -19,6 +19,7 @@ import { ExamPage } from './ExamPage';
 
 interface Seed {
   attemptId: string;
+  paperId: string;
   q1: Question;
   q2: Question;
 }
@@ -111,7 +112,7 @@ async function seed(): Promise<Seed> {
   };
   await db.attempts.put(attempt);
 
-  return { attemptId: attempt.id, q1, q2 };
+  return { attemptId: attempt.id, paperId: paper.id, q1, q2 };
 }
 
 /** 渲染答题页，并把报告页换成一个可断言的标记 */
@@ -275,6 +276,33 @@ describe('答题页交互', () => {
 
     // 以前是每秒 +1 的计数器，重新进入会从 00:00 开始；现在直接从开始时间算
     expect(screen.getByText(/用时 02:0[4-9]/)).toBeTruthy();
+  });
+
+  it('限时卷显示剩余时间，不限时显示已用时间——标签不能写反', async () => {
+    const { attemptId, paperId, q1 } = await seed();
+    // 改成限时 30 分钟，并且已经做了 5 分钟
+    await db.papers.update(paperId, { durationMin: 30 });
+    await db.attempts.update(attemptId, { startedAt: Date.now() - 5 * 60 * 1000 });
+
+    renderExam(attemptId);
+    await screen.findByText(q1.stem);
+
+    // 剩余约 25 分钟，已用约 5 分钟，两个都要给出来
+    expect(screen.getByText(/剩余 2[45]:\d\d/)).toBeTruthy();
+    expect(screen.getByText(/已用 05:0\d/)).toBeTruthy();
+    // 关键：绝不能把剩余时间标成"用时"（曾经就是这么错的）
+    expect(screen.queryByText(/用时 2[45]:/)).toBeNull();
+  });
+
+  it('不限时的卷子显示已用时间', async () => {
+    const { attemptId, q1 } = await seed();
+    await db.attempts.update(attemptId, { startedAt: Date.now() - 125_000 });
+
+    renderExam(attemptId);
+    await screen.findByText(q1.stem);
+
+    expect(screen.getByText(/用时 02:0[4-9]/)).toBeTruthy();
+    expect(screen.queryByText(/剩余/)).toBeNull();
   });
 
   it('答题卡能跳到指定题目', async () => {

@@ -146,6 +146,26 @@ async function seedPreviewData() {
     answers,
   };
   await db.attempts.put(attempt);
+
+  // 一份「正在做」的卷子：用来看答题页。限时 30 分钟，于是能同时看到
+  // 倒计时、已答计数、自动保存提示这些答题页专有的元素。
+  const examPaper: Paper = {
+    id: 'preview-exam-paper',
+    title: '电工基础 · 随堂小测（限时 30 分钟）',
+    outlineId: outline.id,
+    track: 'plc',
+    questionIds: questions.slice(0, 4).map((q) => q.id),
+    durationMin: 30,
+    createdAt: now,
+  };
+  await db.papers.put(examPaper);
+  await db.attempts.put({
+    id: 'preview-exam',
+    paperId: examPaper.id,
+    paperTitle: examPaper.title,
+    startedAt: now - 5 * 60 * 1000, // 已经做了 5 分钟
+    answers: [{ questionId: questions[0].id, userAnswer: questions[0].answer }],
+  });
   await db.mistakes.put({
     id: newId(),
     questionId: questions[4].id,

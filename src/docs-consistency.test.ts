@@ -127,6 +127,18 @@ describe('文档里的知识点数量与内置数据一致', () => {
     const titles = new Set(SEED_OUTLINES.map((s) => s.title));
     expect(titles.size).toBe(SEED_OUTLINES.length);
   });
+
+  it('上手指南里列的每条线的知识点数量都对得上', () => {
+    // 只有被自动核对过的精确数字，才敢写进文档——否则迟早腐烂。
+    const guide = readText('docs/04-上手指南.md');
+    for (const seed of SEED_OUTLINES) {
+      const label = TRACK_LABELS[seed.track];
+      const actual = countSeedNodes(seed.nodes);
+      const row = new RegExp(`\\|\\s*${label}\\s*\\|\\s*(\\d+)\\s*\\|`).exec(guide);
+      expect(row, `上手指南的表格里没有 ${label} 这一行`).toBeTruthy();
+      expect(Number(row![1]), `${label} 在指南里写的是 ${row![1]}，实际是 ${actual}`).toBe(actual);
+    }
+  });
 });
 
 /* ============================== 4. 测试文件清单 ============================== */

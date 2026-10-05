@@ -203,9 +203,11 @@ export function ExamPage() {
   if (!attempt || !paper) return <Loading />;
   if (!questions.length) return <Alert tone="warn">这份卷子里没有题目。</Alert>;
 
-  const timeText = paper.durationMin
-    ? formatTime(Math.max(0, paper.durationMin * 60 - elapsed))
-    : formatTime(elapsed);
+  // 限时卷显示的是**剩余**时间，不限时显示的是**已用**时间——两者含义完全相反，
+  // 标签必须跟着变。之前一律写"用时"，于是一份 30 分钟的卷子做了 5 分钟
+  // 会显示成"用时 24:53"，学生会以为自己已经花了 24 分钟。
+  const remainingSec = paper.durationMin ? Math.max(0, paper.durationMin * 60 - elapsed) : 0;
+  const timeUpSoon = Boolean(paper.durationMin) && remainingSec <= 60;
 
   return (
     <>
@@ -217,7 +219,14 @@ export function ExamPage() {
           <div className="grow">
             <div className="small truncate">{paper.title}</div>
             <div className="small faint">
-              已答 {answeredCount}/{questions.length} · 用时 {timeText}
+              已答 {answeredCount}/{questions.length} ·{' '}
+              <span
+                style={timeUpSoon ? { color: 'var(--bad)', fontWeight: 600 } : undefined}
+                title={paper.durationMin ? '距离自动交卷还有多久' : '本次答题已用时间'}
+              >
+                {paper.durationMin ? `剩余 ${formatTime(remainingSec)}` : `用时 ${formatTime(elapsed)}`}
+              </span>
+              {paper.durationMin ? `（已用 ${formatTime(elapsed)}）` : ''}
               {savedAt > 0 && !busy && ' · 已自动保存'}
             </div>
           </div>

@@ -26,6 +26,7 @@ const ROUTES = [
   ['outlines', '#/outlines', '大纲'],
   ['knowledge', '#/knowledge', '掌握度地图'],
   ['practice', '#/practice', '出题练习'],
+  ['exam', '#/exam/preview-exam', '答题页（限时卷）'],
   ['wrong', '#/wrong', '错题本'],
   ['report', '#/report/preview-attempt', '学习报告'],
   ['me', '#/me', '我的'],
