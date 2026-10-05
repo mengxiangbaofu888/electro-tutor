@@ -155,7 +155,25 @@ if (pushMain.status !== 0) {
 const tags = git(['tag', '-l'], { silent: true }).stdout.split('\n').map((t) => t.trim()).filter(Boolean);
 if (tags.length) {
   console.log(`  推送 ${tags.length} 个标签：${tags.join(', ')}`);
-  git(['-c', `http.extraHeader=Authorization: Basic ${basic}`, 'push', 'origin', '--tags']);
+  const pushTags = git([
+    '-c',
+    `http.extraHeader=Authorization: Basic ${basic}`,
+    'push',
+    'origin',
+    '--tags',
+  ]);
+  // 这一步必须查退出码：标签没推上去时，既不会触发 CI、也不会生成 Release，
+  // 但分支已经推成功了——不报错的话使用者会以为发布完成（真实踩过一次：
+  // v0.27.2 的标签丢了，仓库里没有这个版本，而脚本照样打印"完成"）。
+  if (pushTags.status !== 0) {
+    fail(
+      '分支推成功了，但**标签没推上去**。\n' +
+        '  后果：不会触发自动打包、也不会生成 Release，仓库里等于没有这个版本。\n' +
+        '  补救（逐个补推，或直接重跑本脚本）：\n' +
+        '    git push origin <标签名>',
+    );
+  }
+  console.log('  标签推送完成');
 }
 
 /* ------------------------------ 5. 收尾 ------------------------------ */

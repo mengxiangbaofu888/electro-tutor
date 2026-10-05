@@ -266,6 +266,20 @@ export function IngestPage() {
         </div>
       </Card>
 
+      {/* ---------------- 慕课整门导入 ---------------- */}
+      <Card title="🎓 慕课整门导入（粘一个链接，抓整门课）" extra={<Badge tone="primary">新</Badge>}>
+        <p className="small muted" style={{ marginTop: 0 }}>
+          在中国大学MOOC（icourse163）上学的课，把课程链接粘进来就行：
+          App 自己去抓**课时目录**和**课程自测题（含答案）**，然后你一条条挑要哪些，
+          不用再一节课一个链接地复制。
+        </p>
+        <div className="btn-row">
+          <Button variant="primary" onClick={() => navigate('/mooc')}>
+            去抓一门慕课
+          </Button>
+        </div>
+      </Card>
+
       {/* ---------------- 导入 ---------------- */}
       <Card title="➕ 添加学习材料">
         <Field label="属于哪条学习线">

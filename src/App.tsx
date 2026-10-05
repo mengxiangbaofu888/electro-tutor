@@ -5,6 +5,7 @@ import { NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-d
 import { HomePage } from './features/home/HomePage';
 import { IngestPage } from './features/ingest/IngestPage';
 import { BookAddPage } from './features/book/BookAddPage';
+import { MoocImportPage } from './features/mooc/MoocImportPage';
 import { OutlineListPage } from './features/outline/OutlineListPage';
 import { OutlineDetailPage } from './features/outline/OutlineDetailPage';
 import { PracticePage } from './features/practice/PracticePage';
@@ -60,6 +61,7 @@ export default function App() {
           <Route path="/" element={<HomePage />} />
           <Route path="/materials" element={<IngestPage />} />
           <Route path="/book" element={<BookAddPage />} />
+          <Route path="/mooc" element={<MoocImportPage />} />
           <Route path="/outlines" element={<OutlineListPage />} />
           <Route path="/outlines/:outlineId" element={<OutlineDetailPage />} />
           <Route path="/practice" element={<PracticePage />} />
