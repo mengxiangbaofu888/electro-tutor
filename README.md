@@ -222,8 +222,9 @@ npm run test:watch  # 监听模式
 | `src/lib/srs/srs.test.ts` | 掌握度、遗忘曲线、薄弱点排序、自适应出题的**算法性质**：遗忘单调性、难度因子上下限、题量分配之和不丢不多、纯函数不改入参 |
 | `src/lib/llm/json.test.ts` | 大模型**不干净输出**的容错解析：代码围栏、前后解释文字、多余尾逗号、被 max_tokens 截断 |
 | `src/lib/services/grade.test.ts` | 客观题**判分规则**：多选漏选给一半/错选零分、判断题六种写法归一化、填空按空给分、百分制加权 |
+| `src/features/pages.render.test.tsx` | **每个页面都能渲染**：用服务端首屏渲染确认 10 个页面在无数据时不会白屏（模块导入即崩、hook 用错、空数据越界） |
 
-当前状态：**61 个用例全部通过**。
+当前状态：**71 个用例全部通过**。
 
 ---
 
@@ -236,7 +237,7 @@ npm run test:watch  # 监听模式
 - [x] **M4** 错题本、掌握度、遗忘曲线排程
 - [x] **M5** 自适应出题、学习者画像迭代、补强微讲义
 - [x] **M6** Capacitor 安卓工程 + 一键打包脚本 + GitHub Actions 自动出包
-- [ ] **M7** 推送到 GitHub、发布首个 Release（等 GitHub Token）
+- [ ] **M7** 推送到 GitHub、发布首个 Release（**只差一个 Token**，见 `npm run publish:github`）
 - [ ] **M8** 题库导入导出（Excel）、更多平台字幕适配、考前冲刺模式
 
 > ✅ 安卓安装包**已经在本机构建验证过**：`app-debug.apk`，**4.8 MB**，

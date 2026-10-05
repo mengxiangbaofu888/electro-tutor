@@ -9,7 +9,7 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     environment: 'node',
-    include: ['src/**/*.test.ts'],
+    include: ['src/**/*.test.{ts,tsx}'],
     // db 层依赖 IndexedDB，用内存实现顶替
     setupFiles: ['./src/test-setup.ts'],
     reporters: ['default'],
