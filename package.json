@@ -29,6 +29,7 @@
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.node.json",
     "test": "vitest run",
     "test:watch": "vitest",
+    "probe:cors": "node scripts/probe-cors.mjs",
     "icons": "node scripts/gen-icons.mjs && node scripts/gen-android-assets.mjs"
   },
   "dependencies": {

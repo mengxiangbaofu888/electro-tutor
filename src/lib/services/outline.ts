@@ -72,7 +72,7 @@ export async function generateOutline(params: {
   const messages = buildOutlineMessages({ track, materialText: text, profile, extraInstruction });
 
   let raw = '';
-  await chat(config, messages, {
+  const res = await chat(config, messages, {
     jsonMode: true,
     temperature: 0.3,
     onDelta: (delta) => {
@@ -81,7 +81,10 @@ export async function generateOutline(params: {
     },
   });
 
-  const draft = parseJsonLoose<{ title: string; nodes: OutlineNodeDraft[] }>(raw, '大纲');
+  // 优先用返回值，流式回调只作为兜底。
+  // 只依赖 onDelta 是脆弱的：换一个不回调的实现（或非流式通道）就会解析到空字符串。
+  const draftText = res.content || raw;
+  const draft = parseJsonLoose<{ title: string; nodes: OutlineNodeDraft[] }>(draftText, '大纲');
   if (!draft.nodes?.length) throw new Error('模型没有生成任何知识点，可能是材料内容太少，请换一份更完整的材料再试。');
 
   const outlineId = newId();
