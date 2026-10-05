@@ -36,6 +36,8 @@
     "@capacitor/android": "^8.5.2",
     "@capacitor/cli": "^8.5.2",
     "@capacitor/core": "^8.5.2",
+    "@capacitor/filesystem": "^8.1.4",
+    "@capacitor/share": "^8.0.3",
     "dexie": "^4.4.6",
     "jszip": "^3.10.2",
     "mammoth": "^1.13.0",

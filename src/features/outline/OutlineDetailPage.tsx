@@ -17,19 +17,9 @@ import {
 import { currentScore } from '../../lib/srs';
 import { generateMicroLesson } from '../../lib/services/practice';
 import { bankCsvTemplate, exportQuestionsCsv, importQuestionsFromFile } from '../../lib/services/bank';
+import { saveTextFile } from '../../lib/platform/save-file';
 import { Alert, Badge, Button, Card, Empty, Field, Loading, Sheet, TextArea, TextInput } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
-
-/** 触发浏览器下载一段文本 */
-function downloadText(text: string, filename: string, mime = 'text/plain;charset=utf-8') {
-  const blob = new Blob([text], { type: mime });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
-}
 
 export function OutlineDetailPage() {
   const { outlineId = '' } = useParams();
@@ -61,8 +51,19 @@ export function OutlineDetailPage() {
         setBankMsg('这份大纲下还没有题目，先把题生成出来再导出。');
         return;
       }
-      downloadText(csv, `${outline.title}-题库-${new Date().toISOString().slice(0, 10)}.csv`, 'text/csv;charset=utf-8');
-      setBankMsg(`已导出 ${count} 道题（UTF-8 CSV，Excel / WPS 可直接打开）。`);
+      const result = await saveTextFile({
+        filename: `${outline.title}-题库-${new Date().toISOString().slice(0, 10)}.csv`,
+        content: csv,
+        mime: 'text/csv;charset=utf-8',
+        dialogTitle: '保存题库文件',
+      });
+      setBankMsg(
+        result.cancelled
+          ? '你取消了保存。'
+          : result.via === 'share'
+            ? `已生成 ${count} 道题的 CSV，请在系统面板里选择存到哪（网盘 / 微信 / 本机文件）。`
+            : `已导出 ${count} 道题（UTF-8 CSV，Excel / WPS 可直接打开）。`,
+      );
     } catch (e) {
       setBankMsg(e instanceof Error ? e.message : String(e));
     } finally {
@@ -280,9 +281,29 @@ export function OutlineDetailPage() {
           </Button>
           <Button
             variant="ghost"
-            onClick={() => {
-              downloadText(bankCsvTemplate(), '题库导入模板.csv', 'text/csv;charset=utf-8');
-              setBankMsg('模板已下载，用 Excel / WPS 打开照着填就行。');
+            loading={bankBusy === 'template'}
+            onClick={async () => {
+              setBankBusy('template');
+              setBankMsg('');
+              try {
+                const result = await saveTextFile({
+                  filename: '题库导入模板.csv',
+                  content: bankCsvTemplate(),
+                  mime: 'text/csv;charset=utf-8',
+                  dialogTitle: '保存导入模板',
+                });
+                setBankMsg(
+                  result.cancelled
+                    ? '你取消了保存。'
+                    : result.via === 'share'
+                      ? '模板已生成，请在系统面板里选择存到哪，然后用 Excel / WPS 打开照着填。'
+                      : '模板已保存，用 Excel / WPS 打开照着填就行。',
+                );
+              } catch (e) {
+                setBankMsg(`保存失败：${e instanceof Error ? e.message : String(e)}`);
+              } finally {
+                setBankBusy('');
+              }
             }}
           >
             下载导入模板

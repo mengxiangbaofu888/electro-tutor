@@ -30,6 +30,7 @@ import { PROVIDER_PRESETS, chatCompletionsUrl, isPrivateEndpoint, makeConfig } f
 import { listModels, testConnection } from '../../lib/llm/client';
 import { refreshLearnerProfile } from '../../lib/services/practice';
 import { exportQuestionsCsv } from '../../lib/services/bank';
+import { saveTextFile } from '../../lib/platform/save-file';
 import { Alert, Badge, Button, Card, Field, Loading, Select, Sheet, TextArea, TextInput } from '../../components/ui';
 
 const PROVIDER_OPTIONS = Object.entries(PROVIDER_PRESETS).map(([key, p]) => ({
@@ -144,14 +145,20 @@ export function SettingsPage() {
         mistakes: await db.mistakes.toArray(),
         profiles: await db.profiles.toArray(),
       };
-      const blob = new Blob([JSON.stringify(dump, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `电工陪练备份-${new Date().toISOString().slice(0, 10)}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-      setMessage({ tone: 'ok', text: '备份文件已导出（不含 API Key，可以放心存网盘）。' });
+      const result = await saveTextFile({
+        filename: `电工陪练备份-${new Date().toISOString().slice(0, 10)}.json`,
+        content: JSON.stringify(dump, null, 2),
+        mime: 'application/json',
+        dialogTitle: '保存备份文件',
+      });
+      setMessage({
+        tone: result.cancelled ? 'warn' : 'ok',
+        text: result.cancelled
+          ? '你取消了保存，备份没有生成。换手机前记得重新导出一次。'
+          : result.via === 'share'
+            ? '备份已生成，请在系统面板里选择存到哪（网盘 / 微信 / 本机文件）。文件不含 API Key，可以放心存。'
+            : '备份文件已导出（不含 API Key，可以放心存网盘）。',
+      });
     } finally {
       setBusy('');
     }
@@ -166,16 +173,22 @@ export function SettingsPage() {
         setMessage({ tone: 'warn', text: '题库还是空的，先去「练习」页生成一些题目。' });
         return;
       }
-      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `电工陪练题库-${new Date().toISOString().slice(0, 10)}.csv`;
-      a.click();
-      URL.revokeObjectURL(url);
+      const result = await saveTextFile({
+        filename: `电工陪练题库-${new Date().toISOString().slice(0, 10)}.csv`,
+        content: csv,
+        mime: 'text/csv;charset=utf-8',
+        dialogTitle: '保存题库文件',
+      });
+      if (result.cancelled) {
+        setMessage({ tone: 'warn', text: '你取消了保存。' });
+        return;
+      }
       setMessage({
         tone: 'ok',
-        text: `已导出 ${count} 道题（UTF-8 CSV，Excel / WPS 可直接打开）。想导回来去「大纲」页。`,
+        text:
+          result.via === 'share'
+            ? `已生成 ${count} 道题的 CSV，请在系统面板里选择存到哪。想导回来去「大纲」页。`
+            : `已导出 ${count} 道题（UTF-8 CSV，Excel / WPS 可直接打开）。想导回来去「大纲」页。`,
       });
     } finally {
       setBusy('');

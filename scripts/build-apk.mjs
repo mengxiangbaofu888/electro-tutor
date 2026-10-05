@@ -5,6 +5,11 @@
  *   node scripts/build-apk.mjs            # 调试版（无需签名，可直接安装）
  *   node scripts/build-apk.mjs release    # 正式版（需要先配好签名）
  *
+ * 会按顺序做四件事：
+ *   ① 类型检查  ② 构建网页产物  ③ cap sync 同步进安卓工程  ④ Gradle 打包
+ * ① 和 ② 务必保留：只 sync 不重新构建的话，会把上一次的 dist 打进 APK——
+ * 明明改了前端代码却打出一个旧包，而且不会有任何提示。
+ *
  * 需要先准备：
  *   - JDK 21（Capacitor 8 要求 Java 21）
  *   - Android SDK（platform 36 + build-tools）
@@ -119,7 +124,14 @@ function run(cmd, args, cwd, extraEnv = {}) {
   if (res.status !== 0) fail(`${cmd} 退出码 ${res.status}`);
 }
 
-// 1) 把最新的 dist 同步进安卓工程
+// 1) 先重新构建网页产物。
+//    少了这一步，`npm run apk` 会把**上一次的 dist** 打进 APK——
+//    明明改了前端代码却打出一个旧包，而且不会有任何提示。
+//    所以这里顺带跑类型检查（不通过就不要出包）。
+run('npx', ['tsc', '-p', 'tsconfig.json'], ROOT);
+run('npx', ['vite', 'build'], ROOT);
+
+// 2) 把最新产物同步进安卓工程
 run('npx', ['cap', 'sync', 'android'], ROOT);
 
 // 2) 调 Gradle Wrapper（Windows 用 .bat）
