@@ -105,7 +105,12 @@ function describeHttpError(status: number, bodyText: string): string {
 function describeNetworkError(e: unknown, config: LLMConfig): string {
   const msg = e instanceof Error ? e.message : String(e);
   if (e instanceof DOMException && e.name === 'AbortError') return '请求已取消。';
-  if (/Failed to fetch|NetworkError|Load failed/i.test(msg)) {
+  // 浏览器抛的是 TypeError("Failed to fetch" / "Load failed")，
+  // Node/undici 抛的是 TypeError("fetch failed")，底层原因可能是 DNS、拒连或跨域。
+  if (
+    e instanceof TypeError ||
+    /Failed to fetch|NetworkError|Load failed|fetch failed|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|EAI_AGAIN/i.test(msg)
+  ) {
     return (
       '网络请求被拦截。常见原因有两种：\n' +
       '1）浏览器跨域（CORS）限制——网页版直连大模型接口时会出现，可在「模型配置」里填一个代理前缀，或改用 App 版（原生请求不受跨域限制）；\n' +
@@ -268,17 +273,21 @@ function extractUsage(json: unknown): ChatResult['usage'] {
   return { prompt: u.prompt_tokens, completion: u.completion_tokens };
 }
 
-/** 解析 SSE 流 */
+/** 解析 SSE 流。若服务端其实返回的是普通 JSON（无视了 stream:true），自动退回普通解析。 */
 async function streamResponse(res: Response, opts: ChatOptions): Promise<ChatResult> {
   const reader = res.body!.getReader();
   const decoder = new TextDecoder('utf-8');
   let buffer = '';
   let full = '';
+  let rawAll = '';
+  let sawSse = false;
 
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+    const chunk = decoder.decode(value, { stream: true });
+    rawAll += chunk;
+    buffer += chunk;
     const lines = buffer.split('\n');
     buffer = lines.pop() ?? '';
     for (const line of lines) {
@@ -286,9 +295,10 @@ async function streamResponse(res: Response, opts: ChatOptions): Promise<ChatRes
       if (!trimmed.startsWith('data:')) continue;
       const data = trimmed.slice(5).trim();
       if (!data || data === '[DONE]') continue;
+      sawSse = true;
       try {
-        const chunk = JSON.parse(data) as { choices?: { delta?: { content?: string } }[] };
-        const delta = chunk.choices?.[0]?.delta?.content;
+        const parsed = JSON.parse(data) as { choices?: { delta?: { content?: string } }[] };
+        const delta = parsed.choices?.[0]?.delta?.content;
         if (delta) {
           full += delta;
           opts.onDelta?.(delta);
@@ -298,6 +308,23 @@ async function streamResponse(res: Response, opts: ChatOptions): Promise<ChatRes
       }
     }
   }
+
+  // 有些网关（自建代理、部分中转）会无视 stream: true 直接返回一段完整 JSON。
+  // 这时按 SSE 解析会得到空字符串——用户看到"没有输出"，却不知道为什么。
+  // 所以一个 data: 都没收到时，退回普通解析。
+  if (!sawSse) {
+    const text = rawAll.trim();
+    if (text) {
+      try {
+        return finalize(JSON.parse(text), opts);
+      } catch {
+        // 连 JSON 都不是：把原文当内容返回，也总比返回空好
+        opts.onDelta?.(text);
+        return { content: text };
+      }
+    }
+  }
+
   return { content: full };
 }
 
