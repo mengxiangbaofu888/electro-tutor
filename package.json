@@ -21,11 +21,17 @@
     "build:fast": "vite build",
     "build:single": "vite build --config vite.single.config.ts && node scripts/build-single.mjs",
     "serve": "node scripts/serve-dist.mjs",
+    "cap:sync": "npm run build:fast && cap sync android",
+    "apk": "node scripts/build-apk.mjs",
+    "apk:release": "node scripts/build-apk.mjs release",
     "preview": "vite preview --host",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.node.json",
-    "icons": "node scripts/gen-icons.mjs"
+    "icons": "node scripts/gen-icons.mjs && node scripts/gen-android-assets.mjs"
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.2",
+    "@capacitor/cli": "^8.5.2",
+    "@capacitor/core": "^8.5.2",
     "dexie": "^4.4.6",
     "jszip": "^3.10.2",
     "mammoth": "^1.13.0",

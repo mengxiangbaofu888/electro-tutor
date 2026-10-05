@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 由 scripts/gen-android-assets.mjs 生成，改成与 App 主题一致的深蓝 -->
+<resources>
+    <color name="ic_launcher_background">#0B1120</color>
+</resources>

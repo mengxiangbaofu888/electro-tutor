@@ -1,0 +1,91 @@
+name: Build Android APK
+
+# 推 tag（v*）时自动出包并挂到 Release；也可以手动触发
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 构建 APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: 准备 JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: 准备 Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 安装所需的 SDK 组件
+        run: sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 构建网页产物
+        run: npm run build:fast
+
+      - name: 同步到安卓工程
+        run: npx cap sync android
+
+      - name: 构建调试版 APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: 记录产物信息
+        run: |
+          ls -lh android/app/build/outputs/apk/debug/
+          # 把 APK 重命名成带版本号的名字，方便下载
+          VERSION="${GITHUB_REF_NAME:-manual}"
+          mkdir -p out
+          cp android/app/build/outputs/apk/debug/*.apk "out/electro-tutor-${VERSION}.apk"
+          ls -lh out/
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: electro-tutor-apk
+          path: out/*.apk
+          if-no-files-found: error
+
+      - name: 挂到 Release（仅 tag 触发时）
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*.apk
+          generate_release_notes: true
+          body: |
+            ## 电工陪练 ${{ github.ref_name }}
+
+            安卓安装包在下方 Assets 里下载（`electro-tutor-*.apk`）。
+
+            ### 安装步骤
+            1. 下载 APK 到手机
+            2. 点击安装，系统提示"未知来源"时允许
+            3. 打开 App → 「我的」→「大模型配置」→ 填入你自己的 API Key
+
+            > ⚠️ 这是**调试版**安装包，仅供个人使用。首次安装需要允许"安装未知应用"。
+            > 你的 API Key 只存在手机本地，不会上传到任何服务器。

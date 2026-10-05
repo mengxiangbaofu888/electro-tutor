@@ -110,7 +110,19 @@ npm run build:single   # 产物：dist-single/single.html（约 1.2 MB，CSS/JS 
 
 ### 方式四：打包安卓 APK
 
-见 [`docs/03-开发与部署步骤.md`](docs/03-开发与部署步骤.md)。
+安卓工程（Capacitor）**已经在仓库里了**，准备好 JDK 21 + Android SDK 后一条命令出包：
+
+```bash
+npm run apk        # 调试版，产物在 android/app/build/outputs/apk/debug/
+```
+
+没有 Android Studio、或者网络受限装不上 SDK？仓库里带了一键工具链脚本：
+
+```bash
+node scripts/setup-android-toolchain.mjs   # 把 JDK 21 + Android SDK 装到仓库同级 .android-tools/
+```
+
+详细步骤、CI 配置和排障见 [`docs/03-开发与部署步骤.md`](docs/03-开发与部署步骤.md)。
 
 ---
 
@@ -148,6 +160,7 @@ npm run build:single   # 产物：dist-single/single.html（约 1.2 MB，CSS/JS 
 | 本地数据 | IndexedDB（Dexie 4） | 全离线、隐私好、零服务器成本 |
 | 路由 | react-router（HashRouter） | 便于后续以 `file://` 被 App 壳加载 |
 | PWA | vite-plugin-pwa | 可添加到主屏幕、离线可用 |
+| 安卓壳 | Capacitor 8（JDK 21） | 网页和 App 共用一套代码，原生 HTTP 绕开跨域 |
 | 大模型 | 自研 OAI 兼容适配层 | 预设 + 自定义，支持流式与原生 HTTP |
 | 文档解析 | pdfjs-dist / mammoth / jszip | 不依赖后端 |
 
@@ -162,7 +175,15 @@ electro-tutor/
 ├─ docs/                        # 需求、方案、架构、部署文档
 ├─ public/                      # 图标等静态资源
 ├─ scripts/
-│  └─ gen-icons.mjs             # 零依赖生成 PWA 图标
+│  ├─ lib/png.mjs               # 零依赖 PNG 生成与绘图（zlib 手写 PNG）
+│  ├─ gen-icons.mjs             # 生成 PWA 图标
+│  ├─ gen-android-assets.mjs    # 生成安卓图标与启动页（替换 Capacitor 默认素材）
+│  ├─ setup-android-toolchain.mjs # 一键装 JDK 21 + Android SDK 到 .android-tools/
+│  ├─ build-apk.mjs             # 一键出 APK（跨平台）
+│  ├─ build-single.mjs          # 打包成单文件离线 HTML
+│  └─ serve-dist.mjs            # 预览 dist/ 的极简静态服务器
+├─ android/                     # Capacitor 生成的安卓工程
+├─ .github/workflows/android.yml # 推 tag 自动出 APK 并挂 Release
 ├─ src/
 │  ├─ components/               # 通用 UI 组件 + Markdown 渲染器
 │  ├─ features/                 # 按页面组织的功能模块
@@ -188,14 +209,19 @@ electro-tutor/
 
 ## 路线图
 
-- [x] **M0** 项目骨架、PWA、GitHub 备份
+- [x] **M0** 项目骨架、PWA
 - [x] **M1** 模型配置、材料导入、大纲生成
 - [x] **M2** 出题、组卷、答题
 - [x] **M3** 本地判分 + AI 批改 + 学习报告
 - [x] **M4** 错题本、掌握度、遗忘曲线排程
 - [x] **M5** 自适应出题、学习者画像迭代、补强微讲义
-- [ ] **M6** 打包安卓 APK（Capacitor）+ GitHub Actions 自动出包 + Release
-- [ ] **M7** 更多平台的视频字幕适配、题库导入导出（Excel）、考前冲刺模式
+- [x] **M6** Capacitor 安卓工程 + 一键打包脚本 + GitHub Actions 自动出包
+- [ ] **M7** 推送到 GitHub、发布首个 Release（等 GitHub Token）
+- [ ] **M8** 题库导入导出（Excel）、更多平台字幕适配、考前冲刺模式
+
+> ✅ 安卓安装包**已经在本机构建验证过**：`app-debug.apk`，**4.8 MB**，
+> 包名 `com.electrotutor.app`，应用名「电工陪练」，minSdk 24 / targetSdk 36，
+> 用 Android Debug 证书签名，可直接安装。
 
 ---
 
