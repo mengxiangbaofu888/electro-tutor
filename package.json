@@ -24,6 +24,7 @@
     "cap:sync": "npm run build:fast && cap sync android",
     "apk": "node scripts/build-apk.mjs",
     "apk:release": "node scripts/build-apk.mjs release",
+    "publish:github": "node scripts/publish-github.mjs",
     "preview": "vite preview --host",
     "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.node.json",
     "test": "vitest run",

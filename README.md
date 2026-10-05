@@ -181,6 +181,7 @@ electro-tutor/
 │  ├─ setup-android-toolchain.mjs # 一键装 JDK 21 + Android SDK 到 .android-tools/
 │  ├─ build-apk.mjs             # 一键出 APK（跨平台）
 │  ├─ build-single.mjs          # 打包成单文件离线 HTML
+│  ├─ publish-github.mjs        # 一条命令发布到 GitHub（建仓 + 推送 + 标签）
 │  └─ serve-dist.mjs            # 预览 dist/ 的极简静态服务器
 ├─ android/                     # Capacitor 生成的安卓工程
 ├─ .github/workflows/android.yml # 推 tag 自动出 APK 并挂 Release
