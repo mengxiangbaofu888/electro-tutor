@@ -100,6 +100,81 @@ export function gradeObjective(question: Question, userAnswer: string | string[]
   return { isCorrect: ok, scoreRatio: ok ? 1 : 0 };
 }
 
+/* ------------------------------ 评分结果的规范化 ------------------------------ */
+
+function clamp01(n: number): number {
+  return Math.min(1, Math.max(0, n));
+}
+
+/** 从各种可能写法里取数字（含 "85%" / "85分" 这类字符串） */
+function num(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const n = Number(value.trim().replace(/[%％分]$/, ''));
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+/**
+ * 把模型返回的评分结果规范成 0~1 的得分率；实在判断不出来时返回 null。
+ *
+ * 提示词里要求的是 scoreRatio（0~1 的小数），但模型经常换个名字：
+ *   · score + maxScore / totalScore / fullScore
+ *   · 只给一个裸 score
+ *   · 只在 breakdown 里给了每条评分点的得与满分
+ * 以前的做法是 `Number(draft.scoreRatio) || 0`——**取不到就当成 0 分**。
+ * 于是模型只要换个字段名，学生答对了也拿 0 分，而且界面上完全看不出发生了什么。
+ * 这是最伤信任的失败方式，宁可明确报错也不能静默给 0。
+ */
+export function normalizeScoreRatio(draft: unknown): number | null {
+  if (!draft || typeof draft !== 'object') return null;
+  const d = draft as Record<string, unknown>;
+
+  // 1) 直接给了得分率（也可能被写成百分数）
+  for (const key of ['scoreRatio', 'score_ratio', 'ratio', '得分率']) {
+    const v = num(d[key]);
+    if (v === null) continue;
+    if (v >= 0 && v <= 1) return clamp01(v);
+    if (v > 1 && v <= 100) {
+      // 70 显然是百分数（70%）。但 1.5 这种既不可能是比率、也不像一个百分数，
+      // 猜"满分"或"1.5%"都会给出错误分数——交给调用方明确报错更好。
+      return v < 5 ? null : clamp01(v / 100);
+    }
+    return null; // 负数或超过 100：非法值，不猜
+  }
+
+  // 2) 从分步评分里算——最可靠的一种，因为用的是模型自己给每一步打的分
+  const breakdown = d.breakdown ?? d.details ?? d.steps;
+  if (Array.isArray(breakdown) && breakdown.length) {
+    let got = 0;
+    let full = 0;
+    for (const item of breakdown) {
+      if (!item || typeof item !== 'object') continue;
+      const rec = item as Record<string, unknown>;
+      got += num(rec.got ?? rec.score ?? rec.points ?? rec['得分']) ?? 0;
+      full += num(rec.full ?? rec.maxScore ?? rec.max ?? rec.fullScore ?? rec['满分']) ?? 0;
+    }
+    if (full > 0) return clamp01(got / full);
+  }
+
+  // 3) score + 满分
+  const score = num(d.score ?? d.got ?? d.points ?? d['得分']);
+  const full = num(d.maxScore ?? d.max_score ?? d.totalScore ?? d.total ?? d.fullScore ?? d['满分']);
+  if (score !== null && full !== null && full > 0) return clamp01(score / full);
+
+  // 4) 只有一个裸 score。
+  //    提示词里明确要求"分步评分点总分合计 10 分"，所以 ≤10 按十分制理解；
+  //    ≤1 明显是比率；其余按百分数。
+  if (score !== null) {
+    if (score <= 1) return clamp01(score);
+    if (score <= 10) return clamp01(score / 10);
+    if (score <= 100) return clamp01(score / 100);
+  }
+
+  return null;
+}
+
 /* ------------------------------ 主观题 AI 批改 ------------------------------ */
 
 /** 用大模型批改一道主观题 */
@@ -115,7 +190,17 @@ export async function gradeSubjective(
   const res = await chat(config, messages, { jsonMode: true, temperature: 0.2 });
   const draft = parseJsonLoose<GradeDraft>(res.content, '批改结果');
 
-  const ratio = Math.min(1, Math.max(0, Number(draft.scoreRatio) || 0));
+  const ratio = normalizeScoreRatio(draft);
+  if (ratio === null) {
+    // 宁可明确失败，也不要把"读不出分数"当成 0 分——
+    // 那会让学生以为自己全错了，而其实只是模型换了个字段名。
+    throw new Error(
+      `AI 对这道题的批改结果里没有可识别的分数，已中止交卷以免误判。\n` +
+        `题目：${question.stem.slice(0, 40)}${question.stem.length > 40 ? '…' : ''}\n` +
+        '可以再点一次「交卷批改」重试（已批改的题不会重复扣费）。',
+    );
+  }
+
   return {
     questionId: question.id,
     userAnswer,
@@ -350,11 +435,14 @@ export async function regradeWithAppeal(params: {
   ];
   const res = await chat(config, messages, { jsonMode: true, temperature: 0.2 });
   const draft = parseJsonLoose<GradeDraft>(res.content, '重判结果');
-  const ratio = Math.min(1, Math.max(0, Number(draft.scoreRatio) || 0));
+  const ratio = normalizeScoreRatio(draft);
+  if (ratio === null) {
+    throw new Error('重判结果里没有可识别的分数，无法改分。可以再试一次申诉。');
+  }
   return {
     questionId: question.id,
     userAnswer: params.userAnswer,
-    isCorrect: ratio >= 0.8,
+    isCorrect: typeof draft.isCorrect === 'boolean' ? draft.isCorrect : ratio >= 0.8,
     scoreRatio: ratio,
     aiComment: draft.comment,
     aiBreakdown: Array.isArray(draft.breakdown)

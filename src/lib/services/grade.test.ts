@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { AnswerRecord, Question, QuestionType } from '../db/types';
-import { computeScore, gradeObjective, toAnswerArray } from './grade';
+import { computeScore, gradeObjective, normalizeScoreRatio, toAnswerArray } from './grade';
 
 function makeQuestion(type: QuestionType, answer: string | string[]): Question {
   return {
@@ -127,6 +127,70 @@ describe('填空题判分（多空按比例给分）', () => {
 
   it('没作答得 0 分', () => {
     expect(gradeObjective(q, []).scoreRatio).toBe(0);
+  });
+});
+
+describe('normalizeScoreRatio（模型评分结果的容错）', () => {
+  it('标准写法：scoreRatio', () => {
+    expect(normalizeScoreRatio({ scoreRatio: 0.7 })).toBeCloseTo(0.7, 5);
+    expect(normalizeScoreRatio({ scoreRatio: 1 })).toBe(1);
+    expect(normalizeScoreRatio({ scoreRatio: 0 })).toBe(0);
+  });
+
+  it('字段名换成正则的别名也认', () => {
+    expect(normalizeScoreRatio({ score_ratio: 0.6 })).toBeCloseTo(0.6, 5);
+    expect(normalizeScoreRatio({ ratio: 0.4 })).toBeCloseTo(0.4, 5);
+    expect(normalizeScoreRatio({ 得分率: 0.9 })).toBeCloseTo(0.9, 5);
+  });
+
+  it('得分率写成百分数也能认出来', () => {
+    expect(normalizeScoreRatio({ scoreRatio: 70 })).toBeCloseTo(0.7, 5);
+    expect(normalizeScoreRatio({ scoreRatio: '85%' })).toBeCloseTo(0.85, 5);
+  });
+
+  it('从分步评分求和算出来（最可靠的一条路）', () => {
+    expect(
+      normalizeScoreRatio({
+        breakdown: [
+          { point: '公式', got: 4, full: 4 },
+          { point: '代入', got: 3, full: 3 },
+          { point: '结果', got: 0, full: 3 },
+        ],
+      }),
+    ).toBeCloseTo(0.7, 5);
+  });
+
+  it('score + 满分', () => {
+    expect(normalizeScoreRatio({ score: 7, maxScore: 10 })).toBeCloseTo(0.7, 5);
+    expect(normalizeScoreRatio({ score: 7, total: 10 })).toBeCloseTo(0.7, 5);
+    expect(normalizeScoreRatio({ 得分: 7, 满分: 10 })).toBeCloseTo(0.7, 5);
+  });
+
+  it('只给一个裸 score 时按量级判断（提示词里明确是 10 分制）', () => {
+    expect(normalizeScoreRatio({ score: 0.7 })).toBeCloseTo(0.7, 5); // 已经比率
+    expect(normalizeScoreRatio({ score: 7 })).toBeCloseTo(0.7, 5); // 十分制
+    expect(normalizeScoreRatio({ score: 70 })).toBeCloseTo(0.7, 5); // 百分制
+    expect(normalizeScoreRatio({ score: '7分' })).toBeCloseTo(0.7, 5);
+  });
+
+  it('非法或含糊的数值不猜——宁可返回 null 让上层明确报错', () => {
+    // 1.5 既不可能是比率（比率 ≤1），也不像一个百分数。
+    // 猜"满分 1"或"1.5%"都会给出错误分数，所以拒绝猜测。
+    expect(normalizeScoreRatio({ scoreRatio: 1.5 })).toBeNull();
+    expect(normalizeScoreRatio({ scoreRatio: -3 })).toBeNull();
+    expect(normalizeScoreRatio({ scoreRatio: 120 })).toBeNull();
+  });
+
+  it('确实读不出分数时返回 null，而不是默默当成 0 分', () => {
+    // 这是这条函数存在的理由：以前 `Number(draft.scoreRatio) || 0` 会把
+    // 这些情况统统变成 0 分——学生答对了也拿 0 分。
+    expect(normalizeScoreRatio({ comment: '写得不错' })).toBeNull();
+    expect(normalizeScoreRatio({ isCorrect: true })).toBeNull();
+    expect(normalizeScoreRatio({})).toBeNull();
+    expect(normalizeScoreRatio(null)).toBeNull();
+    expect(normalizeScoreRatio(undefined)).toBeNull();
+    expect(normalizeScoreRatio('0.8')).toBeNull();
+    expect(normalizeScoreRatio({ scoreRatio: '不知道' })).toBeNull();
   });
 });
 

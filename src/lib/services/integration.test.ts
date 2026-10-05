@@ -634,6 +634,49 @@ describe('边界与容错', () => {
     expect(questions[0].answer).toBe('B');
   });
 
+  it('AI 批改结果读不出分数时明确报错，而不是默默给 0 分', async () => {
+    const materialId = newId();
+    await db.materials.put({
+      id: materialId,
+      title: '材料',
+      sourceType: 'text',
+      content: MATERIAL_TEXT,
+      charCount: MATERIAL_TEXT.length,
+      createdAt: Date.now(),
+    });
+    const { outline, points } = await generateOutline({ materialIds: [materialId], track: 'plc' });
+    const questions = await generateQuestions({
+      outlineId: outline.id,
+      track: 'plc',
+      allocation: [{ pointId: points[0].id, count: 1 }],
+      typeMix: [{ type: 'single', count: 1 }],
+      difficultyMix: '标准',
+    });
+    const calc = questions.find((q) => q.type === 'calc');
+    expect(calc, '这套 mock 应该包含一道计算题').toBeTruthy();
+
+    // 模型只回了评语、没有任何分数。
+    // 以前这里会 Number(undefined) || 0 → 0 分，学生答对了也拿 0 分且看不出原因。
+    installChatMock(() => JSON.stringify({ comment: '写得不错，继续加油', knowledgeGaps: ['单位没写'] }));
+    await expect(gradeOne(calc!, '我的作答')).rejects.toThrow(/没有可识别的分数/);
+
+    // 换成 breakdown 形式给分：应该能算出 7/10 = 0.7，而不是报错
+    installChatMock(() =>
+      JSON.stringify({
+        breakdown: [
+          { point: '公式', got: 4, full: 4 },
+          { point: '代入', got: 3, full: 3 },
+          { point: '结果', got: 0, full: 3 },
+        ],
+        comment: '结果精度不对',
+      }),
+    );
+    const record = await gradeOne(calc!, '我的作答');
+    expect(record.scoreRatio).toBeCloseTo(0.7, 5);
+    expect(record.isCorrect).toBe(false);
+    expect(record.aiComment).toContain('精度');
+  });
+
   it('模型虚构了不存在的知识点名称时，题目仍然入库（只是关联为空）', async () => {
     const materialId = newId();
     await db.materials.put({
