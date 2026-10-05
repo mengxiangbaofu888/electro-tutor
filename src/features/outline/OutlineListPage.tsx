@@ -103,7 +103,12 @@ export function OutlineListPage() {
         extraInstruction: instruction.trim() || undefined,
         onProgress: (d) => setStream((prev) => (prev + d).slice(-4000)),
       });
-      setMessage({ tone: 'ok', text: `已生成 ${res.points.length} 个知识点，正在打开…` });
+      setMessage({
+        tone: res.droppedNodes ? 'warn' : 'ok',
+        text: res.droppedNodes
+          ? `已生成 ${res.points.length} 个知识点，另有 ${res.droppedNodes} 个节点因为缺少名称被跳过。正在打开…`
+          : `已生成 ${res.points.length} 个知识点，正在打开…`,
+      });
       setParams({}, { replace: true });
       await load();
       navigate(`/outlines/${res.outline.id}`);

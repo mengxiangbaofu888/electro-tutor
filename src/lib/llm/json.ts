@@ -5,6 +5,21 @@
  * 这里做多级降级尝试，失败时抛出带原文片段的错误，方便排查。
  */
 
+/**
+ * 从对象里按候选键名取第一个非空字符串值。
+ *
+ * 用途：模型经常换字段名（name/title/label、summary/description…）。
+ * 与其在每个解析处各写一份，不如统一用这个。
+ */
+export function pickString(obj: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = obj[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  }
+  return '';
+}
+
 /** 去掉 Markdown 代码围栏 */
 function stripFences(text: string): string {
   const fence = /```(?:json|JSON)?\s*([\s\S]*?)```/;

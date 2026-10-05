@@ -4,7 +4,7 @@
 import { db, getDefaultLLM, getProfile, newId } from '../db/db';
 import type { ID, KnowledgePoint, Material, Outline, TrackId } from '../db/types';
 import { chat, truncateText } from '../llm/client';
-import { parseJsonLoose } from '../llm/json';
+import { parseJsonLoose, pickString } from '../llm/json';
 import { buildOutlineMessages, type OutlineNodeDraft } from '../llm/prompts';
 
 /** 单次塞给模型的材料上限（字符），超出会头尾保留 + 中段省略 */
@@ -13,6 +13,62 @@ const MATERIAL_BUDGET = 24_000;
 export interface OutlineGenerateResult {
   outline: Outline;
   points: KnowledgePoint[];
+  /** 因为节点没有名称而被丢弃的数量（仅 AI 生成时有意义） */
+  droppedNodes?: number;
+}
+
+/**
+ * 把模型返回的知识点树规范化。
+ *
+ * 模型经常换字段名：节点名可能叫 title / label / 名称，说明可能叫 description，
+ * 子节点可能叫 sub / items。以前直接取 node.name——名字缺失时**不报错**，
+ * 而是产出一个没有名字的知识点：界面上是一行空白，出题时把空名字发给模型，
+ * 最后表现为"出题失败"或"出一堆无关的题"。整条线索都看不出真正原因。
+ *
+ * 这里把没名字的节点直接丢掉（而不是产出空节点），并统计丢了多少，
+ * 由上层明确告诉用户。
+ *
+ * 一种例外要保住：模型把"章"这一层的名字漏了，但小节点都有名字
+ * （如 `{summary:'概述', items:[{name:'欧姆定律'}]}`）。这时丢掉整棵子树
+ * 会连有名字的知识点一起吞掉，而计入 dropped 的又只有那一个无名节点，
+ * 提示语"N 个节点因为缺少名称被跳过"就跟实际丢的东西对不上了。
+ * 所以：无名节点本身计数丢弃，它**有名字的子节点提升到当前层级**，不丢内容。
+ */
+export function normalizeOutlineNodes(raw: unknown): { nodes: OutlineNodeDraft[]; dropped: number } {
+  if (!Array.isArray(raw)) return { nodes: [], dropped: 0 };
+  let dropped = 0;
+
+  const walk = (list: unknown[]): OutlineNodeDraft[] => {
+    const out: OutlineNodeDraft[] = [];
+    for (const item of list) {
+      if (!item || typeof item !== 'object') {
+        dropped += 1;
+        continue;
+      }
+      const obj = item as Record<string, unknown>;
+      const name = pickString(obj, ['name', 'title', 'label', '知识点', '名称', '标题']);
+      const childrenRaw = obj.children ?? obj.sub ?? obj.items ?? obj['子项'] ?? obj['子知识点'];
+      if (!name) {
+        dropped += 1;
+        // 无名节点本身不要，但它有名字的子节点提升到当前层级，别把内容一起丢了
+        if (Array.isArray(childrenRaw)) out.push(...walk(childrenRaw));
+        continue;
+      }
+      const summary = pickString(obj, ['summary', 'description', 'desc', '说明', '简介']);
+      const importanceRaw = obj.importance ?? obj.weight ?? obj['重要度'];
+      const children = Array.isArray(childrenRaw) ? walk(childrenRaw) : [];
+
+      out.push({
+        name,
+        summary,
+        importance: Math.min(5, Math.max(1, Math.round(Number(importanceRaw) || 3))),
+        children: children.length ? children : undefined,
+      });
+    }
+    return out;
+  };
+
+  return { nodes: walk(raw), dropped };
 }
 
 function flatten(
@@ -24,6 +80,9 @@ function flatten(
   out: KnowledgePoint[],
 ): void {
   nodes.forEach((node) => {
+    // 兜底：没有名字的节点不落库（无名知识点在界面上是一行空白，
+    // 出题时还会把空名字发给模型，属于典型的"静默坏数据"）
+    if (!node?.name || !String(node.name).trim()) return;
     const point: KnowledgePoint = {
       id: newId(),
       outlineId,
@@ -84,13 +143,24 @@ export async function generateOutline(params: {
   // 优先用返回值，流式回调只作为兜底。
   // 只依赖 onDelta 是脆弱的：换一个不回调的实现（或非流式通道）就会解析到空字符串。
   const draftText = res.content || raw;
-  const draft = parseJsonLoose<{ title: string; nodes: OutlineNodeDraft[] }>(draftText, '大纲');
-  if (!draft.nodes?.length) throw new Error('模型没有生成任何知识点，可能是材料内容太少，请换一份更完整的材料再试。');
+  const draft = parseJsonLoose<{ title?: string; nodes?: unknown }>(draftText, '大纲');
+
+  // 先规范化再落库：模型可能把节点名写成 title/label，
+  // 也可能给出没有名字的节点——那些不能变成无名知识点。
+  const rawNodes = Array.isArray(draft.nodes) ? draft.nodes : [];
+  const { nodes, dropped } = normalizeOutlineNodes(rawNodes);
+  if (!nodes.length) {
+    throw new Error(
+      rawNodes.length
+        ? '模型返回的知识点全部缺少名称，无法使用。请重试或换一个模型。'
+        : '模型没有生成任何知识点，可能是材料内容太少，请换一份更完整的材料再试。',
+    );
+  }
 
   const result = await createOutlineFromNodes({
     title: title?.trim() || draft.title || materials[0].title,
     track,
-    nodes: draft.nodes,
+    nodes,
     materialIds,
   });
 
@@ -99,7 +169,7 @@ export async function generateOutline(params: {
     for (const m of materials) await db.materials.update(m.id, { track });
   });
 
-  return result;
+  return { ...result, droppedNodes: dropped };
 }
 
 /**

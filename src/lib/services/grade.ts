@@ -7,7 +7,7 @@ import { db, getDefaultLLM, getProfile } from '../db/db';
 import type { AnswerRecord, Attempt, ID, Question, QuestionType, StudyReport } from '../db/types';
 import { QUESTION_TYPE_LABELS, isObjective } from '../db/types';
 import { chat } from '../llm/client';
-import { parseJsonLoose } from '../llm/json';
+import { parseJsonLoose, pickString } from '../llm/json';
 import { buildGradeMessages, buildReportMessages, type GradeDraft, type ReportDraft } from '../llm/prompts';
 import { SCORE_PER_QUESTION } from './quiz';
 
@@ -235,6 +235,59 @@ export async function gradeOne(question: Question, userAnswer: string | string[]
   return gradeSubjective(question, userAnswer);
 }
 
+/* ------------------------------ 学习报告的规范化 ------------------------------ */
+
+/**
+ * 把模型返回的学习报告规范化。
+ *
+ * 和批改一样，字段名会变（summary/总评、mistakes/errors、suggestions/advice）。
+ * 原来的 `summary: draft.summary ?? ''` 在字段缺失时会给出一块**空白的总评卡片**——
+ * 用户看到一片空白，分不清是"没生成"还是"生成失败"。
+ * 这里至少给出明确说明，并把能认出来的字段都尽量接上。
+ */
+export function normalizeReportDraft(
+  raw: unknown,
+  score: number,
+  weakPoints: StudyReport['weakPoints'],
+): StudyReport {
+  const d = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+
+  const summary = pickString(d, ['summary', '总评', 'overall', '评价', 'comment', 'overallComment']);
+
+  const mistakesRaw = d.mistakes ?? d.errors ?? d['错题'] ?? d['错因'];
+  const mistakes: StudyReport['mistakes'] = Array.isArray(mistakesRaw)
+    ? mistakesRaw
+        .filter((m): m is Record<string, unknown> => Boolean(m) && typeof m === 'object')
+        .map((rec) => ({
+          questionId: pickString(rec, ['questionId', 'id', '题目', '题目id']),
+          what: pickString(rec, ['what', '错在哪', 'error', 'mistake']),
+          why: pickString(rec, ['why', '根因', 'cause', 'reason']),
+          fix: pickString(rec, ['fix', '怎么补', 'advice', 'suggestion', 'improve']),
+        }))
+        .filter((m) => m.questionId || m.what || m.why || m.fix)
+    : [];
+
+  const suggestionsRaw = d.suggestions ?? d.advice ?? d['建议'];
+  const suggestions = Array.isArray(suggestionsRaw)
+    ? suggestionsRaw
+        .map((s) =>
+          typeof s === 'string'
+            ? s.trim()
+            : pickString((s ?? {}) as Record<string, unknown>, ['text', 'content', 'suggestion', '建议']),
+        )
+        .filter(Boolean)
+    : [];
+
+  return {
+    score,
+    summary: summary || '模型没有给出总评，下面是本地统计出的薄弱点。',
+    weakPoints,
+    mistakes,
+    suggestions,
+    generatedAt: Date.now(),
+  };
+}
+
 /* ------------------------------ 交卷与报告 ------------------------------ */
 
 /** 计算总分（百分制） */
@@ -349,22 +402,7 @@ export async function buildReport(params: {
       },
     });
     const draft = parseJsonLoose<ReportDraft>(res.content || raw, '学习报告');
-    const draftMistakes = Array.isArray(draft.mistakes) ? draft.mistakes : [];
-    return {
-      score,
-      summary: draft.summary ?? '',
-      weakPoints: localWeak,
-      mistakes: draftMistakes
-        .filter((m) => m && m.questionId)
-        .map((m) => ({
-          questionId: String(m.questionId),
-          what: String(m.what ?? ''),
-          why: String(m.why ?? ''),
-          fix: String(m.fix ?? ''),
-        })),
-      suggestions: Array.isArray(draft.suggestions) ? draft.suggestions.map(String) : [],
-      generatedAt: Date.now(),
-    };
+    return normalizeReportDraft(draft, score, localWeak);
   } catch (e) {
     return {
       score,

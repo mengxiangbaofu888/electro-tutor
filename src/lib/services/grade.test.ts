@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { AnswerRecord, Question, QuestionType } from '../db/types';
-import { computeScore, gradeObjective, normalizeScoreRatio, toAnswerArray } from './grade';
+import { computeScore, gradeObjective, normalizeReportDraft, normalizeScoreRatio, toAnswerArray } from './grade';
 
 function makeQuestion(type: QuestionType, answer: string | string[]): Question {
   return {
@@ -191,6 +191,62 @@ describe('normalizeScoreRatio（模型评分结果的容错）', () => {
     expect(normalizeScoreRatio(undefined)).toBeNull();
     expect(normalizeScoreRatio('0.8')).toBeNull();
     expect(normalizeScoreRatio({ scoreRatio: '不知道' })).toBeNull();
+  });
+});
+
+describe('normalizeReportDraft（学习报告的容错）', () => {
+  const weak = [{ knowledgePointId: 'kp1', name: '串联电路', score: 0.3, severity: 0.8, reason: '正确率低' }];
+
+  it('标准字段原样接上', () => {
+    const report = normalizeReportDraft(
+      {
+        summary: '整体不错',
+        mistakes: [{ questionId: 'q1', what: '错在哪', why: '根因', fix: '怎么补' }],
+        suggestions: ['先补星三角', '再练互锁'],
+      },
+      67,
+      weak,
+    );
+    expect(report.score).toBe(67);
+    expect(report.summary).toBe('整体不错');
+    expect(report.mistakes).toEqual([{ questionId: 'q1', what: '错在哪', why: '根因', fix: '怎么补' }]);
+    expect(report.suggestions).toEqual(['先补星三角', '再练互锁']);
+    expect(report.weakPoints).toEqual(weak);
+  });
+
+  it('字段名换了也能认（总评 / 错因 / 建议）', () => {
+    const report = normalizeReportDraft(
+      {
+        总评: '换名字的总评',
+        错因: [{ 题目: 'q2', 错在哪: '概念混了', 根因: '没理解', 怎么补: '画图' }],
+        建议: ['多做题'],
+      },
+      50,
+      weak,
+    );
+    expect(report.summary).toBe('换名字的总评');
+    expect(report.mistakes[0]).toMatchObject({ questionId: 'q2', what: '概念混了', why: '没理解', fix: '画图' });
+    expect(report.suggestions).toEqual(['多做题']);
+  });
+
+  it('总评缺失时给出明确说明，而不是一块空白卡片', () => {
+    const report = normalizeReportDraft({}, 0, weak);
+    expect(report.summary).toContain('没有给出总评');
+    expect(report.mistakes).toEqual([]);
+    expect(report.suggestions).toEqual([]);
+  });
+
+  it('建议写成对象数组时也能取出文本', () => {
+    const report = normalizeReportDraft({ suggestions: [{ text: '甲' }, { 建议: '乙' }, '丙', '', null] }, 1, []);
+    expect(report.suggestions).toEqual(['甲', '乙', '丙']);
+  });
+
+  it('脏数据不会抛错：非对象、缺字段、错类型都兜住', () => {
+    expect(normalizeReportDraft(null, 1, []).summary).toContain('没有给出总评');
+    expect(normalizeReportDraft('一段字符串', 1, []).mistakes).toEqual([]);
+    expect(normalizeReportDraft({ mistakes: '不是数组', suggestions: 123 }, 1, []).mistakes).toEqual([]);
+    // 空对象条目会被过滤掉
+    expect(normalizeReportDraft({ mistakes: [{}, { what: '有内容' }] }, 1, []).mistakes).toHaveLength(1);
   });
 });
 

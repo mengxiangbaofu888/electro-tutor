@@ -677,6 +677,63 @@ describe('边界与容错', () => {
     expect(record.aiComment).toContain('精度');
   });
 
+  it('模型把节点名写成 title 时，大纲照样能用（不是一堆无名知识点）', async () => {
+    const materialId = newId();
+    await db.materials.put({
+      id: materialId,
+      title: '材料',
+      sourceType: 'text',
+      content: MATERIAL_TEXT,
+      charCount: MATERIAL_TEXT.length,
+      createdAt: Date.now(),
+    });
+    // 字段名全换成模型可能用的另一种写法
+    installChatMock(() =>
+      JSON.stringify({
+        title: '换名字的大纲',
+        nodes: [
+          {
+            title: '欧姆定律',
+            description: '电压电流电阻的关系',
+            weight: 5,
+            sub: [{ title: '串联计算', description: '串联分压' }],
+          },
+          { title: '接触器自锁' },
+        ],
+      }),
+    );
+
+    const { points, outline, droppedNodes } = await generateOutline({
+      materialIds: [materialId],
+      track: 'plc',
+    });
+
+    expect(droppedNodes).toBe(0);
+    expect(points).toHaveLength(3);
+    expect(points.every((p) => p.name.trim().length > 0)).toBe(true);
+    expect(points[0].name).toBe('欧姆定律');
+    expect(points[0].summary).toBe('电压电流电阻的关系');
+    expect(points[0].importance).toBe(5);
+    expect(points[1].name).toBe('串联计算');
+    expect(points[1].parentId).toBe(points[0].id);
+    expect(outline.title).toBe('换名字的大纲');
+  });
+
+  it('模型返回的节点全都没有名称时，明确报错而不是产出空大纲', async () => {
+    const materialId = newId();
+    await db.materials.put({
+      id: materialId,
+      title: '材料',
+      sourceType: 'text',
+      content: MATERIAL_TEXT,
+      charCount: MATERIAL_TEXT.length,
+      createdAt: Date.now(),
+    });
+    installChatMock(() => JSON.stringify({ nodes: [{ summary: '只有说明' }, { foo: 'bar' }] }));
+
+    await expect(generateOutline({ materialIds: [materialId], track: 'plc' })).rejects.toThrow(/缺少名称/);
+  });
+
   it('模型虚构了不存在的知识点名称时，题目仍然入库（只是关联为空）', async () => {
     const materialId = newId();
     await db.materials.put({

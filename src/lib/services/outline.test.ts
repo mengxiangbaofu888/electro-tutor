@@ -18,7 +18,7 @@ import type {
   TrackId,
 } from '../db/types';
 import { createMastery } from '../srs';
-import { deleteOutline, removeKnowledgePoint } from './outline';
+import { deleteOutline, normalizeOutlineNodes, removeKnowledgePoint } from './outline';
 
 /* ------------------------------ 造数据 ------------------------------ */
 
@@ -159,6 +159,82 @@ describe('删除大纲', () => {
 
   it('删不存在的大纲不会抛错', async () => {
     await expect(deleteOutline('根本没有这个 id')).resolves.toBeUndefined();
+  });
+});
+
+/* ============================== 模型输出的容错 ============================== */
+
+describe('normalizeOutlineNodes（模型返回的知识点树容错）', () => {
+  it('标准字段原样保留', () => {
+    const { nodes, dropped } = normalizeOutlineNodes([
+      { name: '欧姆定律', summary: '说明', importance: 5, children: [{ name: '串联计算', summary: '子说明', importance: 4 }] },
+    ]);
+    expect(dropped).toBe(0);
+    expect(nodes).toEqual([
+      { name: '欧姆定律', summary: '说明', importance: 5, children: [{ name: '串联计算', summary: '子说明', importance: 4 }] },
+    ]);
+  });
+
+  it('节点名写成 title / 名称 也能认，说明写成 description 也能认', () => {
+    const { nodes } = normalizeOutlineNodes([
+      { title: '甲', description: '说明甲', weight: 4 },
+      { 名称: '乙' },
+    ]);
+    expect(nodes.map((n) => n.name)).toEqual(['甲', '乙']);
+    expect(nodes[0].summary).toBe('说明甲');
+    expect(nodes[0].importance).toBe(4);
+    expect(nodes[1].importance).toBe(3); // 缺省给 3
+  });
+
+  it('子节点写成 sub / items / 子项 也能认', () => {
+    expect(normalizeOutlineNodes([{ name: '甲', sub: [{ name: '子甲' }] }]).nodes[0].children?.[0].name).toBe('子甲');
+    expect(normalizeOutlineNodes([{ name: '甲', items: [{ name: '子甲' }] }]).nodes[0].children?.[0].name).toBe('子甲');
+    expect(normalizeOutlineNodes([{ name: '甲', 子项: [{ name: '子甲' }] }]).nodes[0].children?.[0].name).toBe('子甲');
+  });
+
+  it('没有名称的节点被丢弃并计数——不再产出无名知识点', () => {
+    const { nodes, dropped } = normalizeOutlineNodes([
+      { name: '有名字' },
+      { summary: '只有说明没有名字' },
+      null,
+      '字符串节点',
+      { name: '   ' },
+    ]);
+    expect(nodes.map((n) => n.name)).toEqual(['有名字']);
+    expect(dropped).toBe(4);
+  });
+
+  it('重要度被夹在 1~5；非数字给默认 3', () => {
+    const { nodes } = normalizeOutlineNodes([
+      { name: 'a', importance: 99 },
+      { name: 'b', importance: -2 },
+      { name: 'c', importance: '不知道' },
+      { name: 'd', importance: 3.6 },
+    ]);
+    expect(nodes.map((n) => n.importance)).toEqual([5, 1, 3, 4]);
+  });
+
+  it('章这一层漏了名字时，有名字的小节点提升上来而不是整棵子树被吞掉', () => {
+    const { nodes, dropped } = normalizeOutlineNodes([
+      { summary: '概述，忘了写名字', items: [{ name: '欧姆定律' }, { name: '基尔霍夫定律' }] },
+    ]);
+    // 无名的"章"被丢弃并计数，说明跟实际丢的东西对得上（内容没丢）
+    expect(dropped).toBe(1);
+    expect(nodes.map((n) => n.name)).toEqual(['欧姆定律', '基尔霍夫定律']);
+  });
+
+  it('嵌套两层都漏名字时，计数与提升都对', () => {
+    const { nodes, dropped } = normalizeOutlineNodes([
+      { items: [{ items: [{ name: '深处的知识点' }] }] },
+    ]);
+    expect(dropped).toBe(2);
+    expect(nodes.map((n) => n.name)).toEqual(['深处的知识点']);
+  });
+
+  it('非数组输入返回空结果而不是抛错', () => {
+    expect(normalizeOutlineNodes(undefined)).toEqual({ nodes: [], dropped: 0 });
+    expect(normalizeOutlineNodes('abc')).toEqual({ nodes: [], dropped: 0 });
+    expect(normalizeOutlineNodes({ name: 'x' })).toEqual({ nodes: [], dropped: 0 });
   });
 });
 
