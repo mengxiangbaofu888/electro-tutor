@@ -18,9 +18,34 @@ import { QUESTION_TYPE_LABELS } from '../db/types';
 
 /* ============================== 底层 CSV ============================== */
 
-/** 解析 CSV 文本为二维数组。支持引号包裹、双引号转义、字段内逗号与换行。 */
-export function parseCsvRows(text: string): string[][] {
+/** 猜分隔符：从第一行非空内容里数，谁出现的次数多就算谁 */
+export function guessDelimiter(text: string): string {
+  const firstLine =
+    text
+      .replace(/^\ufeff/, '')
+      .split(/\r?\n/)
+      .find((line) => line.trim().length > 0) ?? '';
+  const candidates = ['\t', ',', ';', '|'];
+  let best = ',';
+  let bestCount = 0;
+  for (const d of candidates) {
+    const count = firstLine.split(d).length - 1;
+    if (count > bestCount) {
+      best = d;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
+/**
+ * 解析分隔符文本为二维数组。支持引号包裹、双引号转义、字段内分隔符与换行。
+ * @param delimiter 省略时自动猜——从 Excel/WPS 里复制粘贴出来的是制表符分隔，
+ *                  欧洲区导出的 CSV 常用分号，所以不能写死逗号。
+ */
+export function parseDelimitedRows(text: string, delimiter?: string): string[][] {
   const src = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text; // 去 BOM
+  const sep = delimiter ?? guessDelimiter(src);
   const rows: string[][] = [];
   let row: string[] = [];
   let field = '';
@@ -49,7 +74,7 @@ export function parseCsvRows(text: string): string[][] {
       i += 1;
       continue;
     }
-    if (ch === ',') {
+    if (ch === sep) {
       row.push(field);
       field = '';
       i += 1;
@@ -76,6 +101,11 @@ export function parseCsvRows(text: string): string[][] {
   }
   // 丢掉全空行
   return rows.filter((r) => r.some((c) => c.trim().length > 0));
+}
+
+/** 严格按逗号解析（保留旧名字，供只认 CSV 的场景使用） */
+export function parseCsvRows(text: string): string[][] {
+  return parseDelimitedRows(text, ',');
 }
 
 function csvField(value: string): string {
@@ -205,9 +235,8 @@ export interface ParseResult {
   warnings: string[];
 }
 
-/** 把 CSV 文本解析成题目草稿（不碰数据库，方便测试） */
-export function parseQuestionsCsv(text: string): ParseResult {
-  const rows = parseCsvRows(text);
+/** 把二维表解析成题目草稿（不碰数据库，方便测试） */
+export function parseQuestionRows(rows: string[][]): ParseResult {
   const warnings: string[] = [];
   if (!rows.length) return { questions: [], warnings: ['文件是空的。'] };
 
@@ -253,6 +282,94 @@ export function parseQuestionsCsv(text: string): ParseResult {
 
   if (!questions.length) warnings.push('表头之后没有找到任何有效题目行。');
   return { questions, warnings };
+}
+
+/** 从分隔符文本解析题目（CSV / TSV / 分号分隔都认） */
+export function parseQuestionsCsv(text: string): ParseResult {
+  return parseQuestionRows(parseDelimitedRows(text));
+}
+
+/* ============================== Excel（xlsx）直读 ============================== */
+
+/** 把 &amp; 之类的实体还原 */
+function decodeXml(text: string): string {
+  return text
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, d: string) => String.fromCodePoint(Number(d)))
+    .replace(/&amp;/g, '&');
+}
+
+/** 列号字母转下标：A→0，B→1，AA→26 */
+function columnIndex(letters: string): number {
+  let n = 0;
+  for (const ch of letters.toUpperCase()) {
+    n = n * 26 + (ch.charCodeAt(0) - 64);
+  }
+  return n - 1;
+}
+
+/**
+ * 直接读 .xlsx 的第一个工作表，返回二维字符串数组。
+ *
+ * 为什么要直读：低压电工证的官方题库绝大多数是以 Excel 形式流传的，
+ * 要求用户先"另存为 CSV"再导入，就是白白多一步、而且很容易存错格式。
+ *
+ * 这是按需解析（只认单元格文本与共享字符串表），不是完整的 OOXML 实现：
+ * 公式取缓存值、日期会显示成序列号、合并单元格只取左上角的值。
+ * 对题库这种以文本为主的表格足够了。
+ */
+export async function xlsxToRows(data: ArrayBuffer): Promise<string[][]> {
+  const { default: JSZip } = await import('jszip');
+  const zip = await JSZip.loadAsync(data);
+
+  // 共享字符串表：单元格里 t="s" 时 <v> 存的是这张表的下标
+  const sharedXml = await zip.file('xl/sharedStrings.xml')?.async('string');
+  const shared: string[] = [];
+  if (sharedXml) {
+    for (const si of sharedXml.matchAll(/<si>([\s\S]*?)<\/si>/g)) {
+      const parts = [...si[1].matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)].map((m) => decodeXml(m[1]));
+      shared.push(parts.join(''));
+    }
+  }
+
+  // 取第一个工作表（去掉自闭合标签，避免正则跨单元格误吞）
+  const sheetPath = Object.keys(zip.files)
+    .filter((name) => /^xl\/worksheets\/sheet\d+\.xml$/.test(name))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0];
+  if (!sheetPath) return [];
+  const sheetXml = (await zip.file(sheetPath)?.async('string')) ?? '';
+
+  const rows: string[][] = [];
+  const body = sheetXml.replace(/<row[^>]*\/>/g, '');
+  for (const rowMatch of body.matchAll(/<row[^>]*>([\s\S]*?)<\/row>/g)) {
+    const cellsXml = rowMatch[1].replace(/<c[^>]*\/>/g, '');
+    const cells: string[] = [];
+    for (const cellMatch of cellsXml.matchAll(/<c([^>]*)>([\s\S]*?)<\/c>/g)) {
+      const attrs = cellMatch[1];
+      const inner = cellMatch[2];
+      const ref = /r="([A-Z]+)\d+"/.exec(attrs)?.[1];
+      const index = ref ? columnIndex(ref) : cells.length;
+      const type = /t="([^"]+)"/.exec(attrs)?.[1];
+
+      let value = '';
+      if (type === 's') {
+        const v = /<v>([\s\S]*?)<\/v>/.exec(inner)?.[1] ?? '';
+        value = shared[Number(v)] ?? '';
+      } else if (type === 'inlineStr') {
+        value = [...inner.matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)].map((m) => decodeXml(m[1])).join('');
+      } else {
+        value = decodeXml(/<v>([\s\S]*?)<\/v>/.exec(inner)?.[1] ?? '');
+      }
+
+      while (cells.length < index) cells.push('');
+      cells[index] = value;
+    }
+    rows.push(cells);
+  }
+  return rows.filter((r) => r.some((c) => c.trim().length > 0));
 }
 
 /* ============================== 导出 ============================== */
@@ -347,16 +464,16 @@ export interface ImportResult {
  * 知识点名称会先在已有知识点里精确匹配，匹配不到再尝试包含匹配，
  * 还是匹配不到就**自动新建**一个知识点（否则题目会没有归属，掌握度统计不到）。
  */
-export async function importQuestionsCsv(params: {
-  text: string;
+export async function importQuestionRows(params: {
+  rows: string[][];
   outlineId: ID;
   onProgress?: (done: number, total: number) => void;
 }): Promise<ImportResult> {
-  const { text, outlineId, onProgress } = params;
+  const { rows: inputRows, outlineId, onProgress } = params;
   const outline: Outline | undefined = await db.outlines.get(outlineId);
   if (!outline) throw new Error('目标大纲不存在。');
 
-  const { questions: parsed, warnings } = parseQuestionsCsv(text);
+  const { questions: parsed, warnings } = parseQuestionRows(inputRows);
   if (!parsed.length) {
     return { imported: 0, createdPoints: 0, warnings: warnings.length ? warnings : ['没有解析到任何题目。'] };
   }
@@ -427,4 +544,39 @@ export async function importQuestionsCsv(params: {
   if (noAnswer > 0) warnings.push(`有 ${noAnswer} 道题没有答案，做题时无法判分，建议补齐。`);
 
   return { imported: rows.length, createdPoints, warnings };
+}
+
+/** 从 CSV / TSV 等分隔符文本导入题目 */
+export function importQuestionsCsv(params: {
+  text: string;
+  outlineId: ID;
+  onProgress?: (done: number, total: number) => void;
+}): Promise<ImportResult> {
+  return importQuestionRows({
+    rows: parseDelimitedRows(params.text),
+    outlineId: params.outlineId,
+    onProgress: params.onProgress,
+  });
+}
+
+/**
+ * 从用户选的文件导入：.xlsx 直读，其余按分隔符文本处理。
+ * 这是界面上真正调用的入口。
+ */
+export async function importQuestionsFromFile(params: {
+  file: File;
+  outlineId: ID;
+  onProgress?: (done: number, total: number) => void;
+}): Promise<ImportResult> {
+  const name = params.file.name.toLowerCase();
+  if (name.endsWith('.xlsx')) {
+    const rows = await xlsxToRows(await params.file.arrayBuffer());
+    return importQuestionRows({ rows, outlineId: params.outlineId, onProgress: params.onProgress });
+  }
+  const text = await params.file.text();
+  return importQuestionRows({
+    rows: parseDelimitedRows(text),
+    outlineId: params.outlineId,
+    onProgress: params.onProgress,
+  });
 }

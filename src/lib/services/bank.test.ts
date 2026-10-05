@@ -10,12 +10,17 @@ import { db, newId } from '../db/db';
 import type { KnowledgePoint, Outline, Question } from '../db/types';
 import {
   exportQuestionsCsv,
+  guessDelimiter,
   importQuestionsCsv,
+  importQuestionsFromFile,
   parseAnswer,
   parseCsvRows,
+  parseDelimitedRows,
+  parseQuestionRows,
   parseQuestionsCsv,
   renderAnswer,
   toCsvText,
+  xlsxToRows,
 } from './bank';
 
 async function clearAll() {
@@ -294,5 +299,182 @@ describe('renderAnswer', () => {
     expect(renderAnswer('multiple', ['A', 'C'])).toBe('AC');
     expect(renderAnswer('blank', ['欧姆', '安培'])).toBe('欧姆；安培');
     expect(renderAnswer('single', 'B')).toBe('B');
+  });
+});
+
+/* ============================== 分隔符自动识别 ============================== */
+
+describe('分隔符自动识别', () => {
+  it('制表符分隔（从 Excel 复制粘贴出来的常见形态）', () => {
+    const tsv = '题型\t题干\t答案\n单选题\t欧姆定律的表达式是？\tA';
+    expect(guessDelimiter(tsv)).toBe('\t');
+
+    const { questions } = parseQuestionsCsv(tsv);
+    expect(questions).toHaveLength(1);
+    expect(questions[0].stem).toBe('欧姆定律的表达式是？');
+    expect(questions[0].answer).toBe('A');
+  });
+
+  it('分号分隔也能认（欧洲区导出的 CSV 常见）', () => {
+    const scsv = '题型;题干;答案\n判断题;串联电路中电流处处相等;正确';
+    expect(guessDelimiter(scsv)).toBe(';');
+    expect(parseQuestionsCsv(scsv).questions[0].answer).toBe('正确');
+  });
+
+  it('逗号分隔不会被误判（纯 CSV 仍然走逗号）', () => {
+    expect(guessDelimiter('题型,题干,答案')).toBe(',');
+    expect(parseDelimitedRows('a,b\nc,d')).toEqual([
+      ['a', 'b'],
+      ['c', 'd'],
+    ]);
+  });
+
+  it('显式指定分隔符时不做自动识别', () => {
+    expect(parseDelimitedRows('a;b,c', ';')).toEqual([['a', 'b,c']]);
+  });
+});
+
+/* ============================== Excel 直读 ============================== */
+
+/** 列号转字母：0→A，25→Z，26→AA */
+function colLetter(index: number): string {
+  let n = index + 1;
+  let out = '';
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    out = String.fromCharCode(65 + rem) + out;
+    n = Math.floor((n - 1) / 26);
+  }
+  return out;
+}
+
+function escapeXml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/**
+ * 用 jszip 现造一个最小可用的 .xlsx。
+ * 纯数字的单元格写成数字单元格（不带 t="s"），用来覆盖两条取值分支。
+ */
+async function makeXlsx(rows: string[][]): Promise<ArrayBuffer> {
+  const { default: JSZip } = await import('jszip');
+  const zip = new JSZip();
+  const shared: string[] = [];
+
+  const rowXml = rows
+    .map((cells, r) => {
+      const cellXml = cells
+        .map((value, c) => {
+          if (!value) return ''; // 空单元格直接不写，靠 r 属性补位
+          const ref = `${colLetter(c)}${r + 1}`;
+          if (/^\d+$/.test(value)) return `<c r="${ref}"><v>${value}</v></c>`;
+          let index = shared.indexOf(value);
+          if (index < 0) {
+            shared.push(value);
+            index = shared.length - 1;
+          }
+          return `<c r="${ref}" t="s"><v>${index}</v></c>`;
+        })
+        .join('');
+      return `<row r="${r + 1}">${cellXml}</row>`;
+    })
+    .join('');
+
+  zip.file(
+    'xl/sharedStrings.xml',
+    `<?xml version="1.0"?><sst count="${shared.length}">${shared
+      .map((s) => `<si><t>${escapeXml(s)}</t></si>`)
+      .join('')}</sst>`,
+  );
+  zip.file(
+    'xl/worksheets/sheet1.xml',
+    `<?xml version="1.0"?><worksheet><sheetData>${rowXml}</sheetData></worksheet>`,
+  );
+  return zip.generateAsync({ type: 'arraybuffer' });
+}
+
+describe('Excel(.xlsx) 直读', () => {
+  const SHEET = [
+    ['题型', '题干', '选项A', '选项B', '答案', '解析', '难度', '知识点'],
+    ['单选题', '欧姆定律的表达式是？', 'U=IR', 'U=I/R', 'A', '最常见的形式', '2', '欧姆定律'],
+    ['判断题', '串联电路中各处电流都相等。', '', '', '正确', '串联只有一条通路', '1', '串联电路的计算'],
+  ];
+
+  it('读出表头与数据行，列位置对得上（空单元格靠 r 属性补位）', async () => {
+    const rows = await xlsxToRows(await makeXlsx(SHEET));
+
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toEqual(['题型', '题干', '选项A', '选项B', '答案', '解析', '难度', '知识点']);
+    // 第二行缺了选项，但后面各列不能错位
+    expect(rows[2][0]).toBe('判断题');
+    expect(rows[2][4]).toBe('正确');
+    expect(rows[2][6]).toBe('1');
+    expect(rows[2][7]).toBe('串联电路的计算');
+  });
+
+  it('读出后能直接当题库解析（含数字单元格里的难度）', async () => {
+    const rows = await xlsxToRows(await makeXlsx(SHEET));
+    const { questions } = parseQuestionRows(rows);
+
+    expect(questions).toHaveLength(2);
+    expect(questions[0]).toMatchObject({ type: 'single', answer: 'A', difficulty: 2 });
+    expect(questions[0].options).toEqual([
+      { key: 'A', text: 'U=IR' },
+      { key: 'B', text: 'U=I/R' },
+    ]);
+    expect(questions[0].knowledgeNames).toEqual(['欧姆定律']);
+    expect(questions[1]).toMatchObject({ type: 'judge', answer: '正确', difficulty: 1 });
+  });
+
+  it('实体字符会被还原', async () => {
+    const rows = await xlsxToRows(await makeXlsx([['题干'], ['U<12V 且 I>2A & R 正常']]));
+    expect(rows[1][0]).toBe('U<12V 且 I>2A & R 正常');
+  });
+});
+
+/* ============================== 文件入口 ============================== */
+
+describe('从文件导入（界面真正调用的入口）', () => {
+  beforeEach(clearAll);
+
+  it('.xlsx 文件直接导，不需要先另存为 CSV', async () => {
+    const outline = await makeOutline();
+    const buffer = await makeXlsx([
+      ['题型', '题干', '选项A', '选项B', '答案', '解析', '难度', '知识点'],
+      ['单选题', '欧姆定律的表达式是？', 'U=IR', 'U=I/R', 'A', '最常见的形式', '2', '欧姆定律'],
+      ['判断题', '串联电路中各处电流都相等。', '', '', '正确', '串联只有一条通路', '1', '串联电路的计算'],
+    ]);
+    const file = new File([buffer], '低压电工证题库.xlsx');
+
+    const result = await importQuestionsFromFile({ file, outlineId: outline.id });
+
+    expect(result.imported).toBe(2);
+    expect(result.createdPoints).toBe(2); // 两个知识点都不存在，自动建
+    const imported = await db.questions.where('outlineId').equals(outline.id).toArray();
+    expect(imported).toHaveLength(2);
+    expect(imported.every((q) => q.source === 'imported')).toBe(true);
+  });
+
+  it('.txt（制表符分隔）文件也能导', async () => {
+    const outline = await makeOutline();
+    const file = new File(['题型\t题干\t答案\n单选题\t欧姆定律的表达式是？\tA'], '题库.txt');
+
+    const result = await importQuestionsFromFile({ file, outlineId: outline.id });
+
+    expect(result.imported).toBe(1);
+    expect((await db.questions.toArray())[0].answer).toBe('A');
+  });
+
+  it('.csv 文件照旧走 CSV 解析', async () => {
+    const outline = await makeOutline();
+    const file = new File(['题型,题干,答案\n判断题,串联电流相等,正确'], '题库.csv');
+
+    const result = await importQuestionsFromFile({ file, outlineId: outline.id });
+
+    expect(result.imported).toBe(1);
+    expect((await db.questions.toArray())[0].type).toBe('judge');
   });
 });

@@ -16,7 +16,7 @@ import {
 } from '../../lib/services/outline';
 import { currentScore } from '../../lib/srs';
 import { generateMicroLesson } from '../../lib/services/practice';
-import { bankCsvTemplate, exportQuestionsCsv, importQuestionsCsv } from '../../lib/services/bank';
+import { bankCsvTemplate, exportQuestionsCsv, importQuestionsFromFile } from '../../lib/services/bank';
 import { Alert, Badge, Button, Card, Empty, Field, Loading, Sheet, TextArea, TextInput } from '../../components/ui';
 import { Markdown } from '../../components/Markdown';
 
@@ -70,15 +70,14 @@ export function OutlineDetailPage() {
     }
   }
 
-  /** 从 CSV 导入题库到这份大纲 */
+  /** 从 Excel / CSV / TSV 导入题库到这份大纲 */
   async function importBank(file: File) {
     if (!outline) return;
     setBankBusy('import');
     setBankMsg('');
     try {
-      const text = await file.text();
-      const res = await importQuestionsCsv({
-        text,
+      const res = await importQuestionsFromFile({
+        file,
         outlineId: outline.id,
         onProgress: (done, total) => setBankMsg(`正在导入 ${done}/${total}…`),
       });
@@ -257,17 +256,17 @@ export function OutlineDetailPage() {
       {/* 题库导入导出 */}
       <Card title="📥 题库导入 / 导出">
         <p className="small muted" style={{ marginTop: 0 }}>
-          找到现成的题库时（比如低压电工证的官方题库），整理成 CSV 就能导进来刷。
-          表头认中英文、列顺序随意。填空题多个空用 <code>;</code> 分隔，
-          同一个空的多种写法用 <code>|</code> 分隔。
+          找到现成的题库时（比如低压电工证的官方题库），<b>Excel(.xlsx) 可以直接导</b>，
+          CSV / 制表符分隔的文本也都认。表头要包含「题干」，其余列（题型、选项A~F、答案、解析、难度、知识点）中英文都认、顺序随意。
+          填空题多个空用 <code>;</code> 分隔，同一个空的多种写法用 <code>|</code> 分隔。
         </p>
         {bankMsg && <Alert>{bankMsg}</Alert>}
         <div className="btn-row">
           <label className="btn primary">
-            导入 CSV
+            导入题库
             <input
               type="file"
-              accept=".csv,.txt"
+              accept=".xlsx,.csv,.txt,.tsv"
               style={{ display: 'none' }}
               onChange={(e) => {
                 const f = e.target.files?.[0];
