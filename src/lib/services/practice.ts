@@ -67,8 +67,10 @@ export async function ensureQuestionsForPoints(params: {
   onStatus?: (text: string) => void;
   /** 模型流式输出 */
   onProgress?: (delta: string) => void;
+  /** 非致命提示（例如有题目格式不完整被跳过） */
+  onWarning?: (text: string) => void;
 }): Promise<Question[]> {
-  const { pointIds, targetCount = 10, onStatus, onProgress } = params;
+  const { pointIds, targetCount = 10, onStatus, onProgress, onWarning } = params;
   if (!pointIds.length) throw new Error('没有指定知识点。');
 
   const existing = await listQuestionsByPoints(pointIds);
@@ -117,6 +119,7 @@ export async function ensureQuestionsForPoints(params: {
     difficultyMix: '标准：以 2~3 星为主，穿插一道稍难的',
     withMaterial: true,
     onProgress,
+    onWarning,
   });
   onStatus?.('');
 

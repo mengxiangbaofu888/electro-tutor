@@ -508,6 +508,132 @@ describe('边界与容错', () => {
     expect(points).toHaveLength(4);
   });
 
+  it('模型返回的坏题会被跳过并说明原因，而不是静默入库', async () => {
+    const materialId = newId();
+    await db.materials.put({
+      id: materialId,
+      title: '材料',
+      sourceType: 'text',
+      content: MATERIAL_TEXT,
+      charCount: MATERIAL_TEXT.length,
+      createdAt: Date.now(),
+    });
+    const { outline, points } = await generateOutline({ materialIds: [materialId], track: 'plc' });
+
+    let warning = '';
+    installChatMock(() =>
+      JSON.stringify({
+        questions: [
+          // 好题：两个选项且答案在选项里
+          {
+            knowledgePointNames: ['欧姆定律'],
+            type: 'single',
+            stem: '好题',
+            options: [
+              { key: 'A', text: '甲' },
+              { key: 'B', text: '乙' },
+            ],
+            answer: 'A',
+            explanation: '',
+            difficulty: 2,
+          },
+          // 坏题一：单选题只有一个选项（没法作答）
+          {
+            knowledgePointNames: ['欧姆定律'],
+            type: 'single',
+            stem: '坏题一',
+            options: [{ key: 'A', text: '甲' }],
+            answer: 'A',
+            explanation: '',
+            difficulty: 2,
+          },
+          // 坏题二：没有答案（永远判不对）
+          { knowledgePointNames: ['欧姆定律'], type: 'judge', stem: '坏题二', answer: '', explanation: '', difficulty: 2 },
+          // 坏题三：答案不在选项里
+          {
+            knowledgePointNames: ['欧姆定律'],
+            type: 'single',
+            stem: '坏题三',
+            options: [
+              { key: 'A', text: '甲' },
+              { key: 'B', text: '乙' },
+            ],
+            answer: 'D',
+            explanation: '',
+            difficulty: 2,
+          },
+        ],
+      }),
+    );
+
+    const questions = await generateQuestions({
+      outlineId: outline.id,
+      track: 'plc',
+      allocation: [{ pointId: points[0].id, count: 1 }],
+      typeMix: [{ type: 'single', count: 1 }],
+      difficultyMix: '标准',
+      onWarning: (t) => {
+        warning = t;
+      },
+    });
+
+    // 只有好题留下，坏题一道都不进库
+    expect(questions).toHaveLength(1);
+    expect(questions[0].stem).toBe('好题');
+    expect(await db.questions.count()).toBe(1);
+
+    // 而且必须说出来——静默丢弃会让用户以为"模型只出了这么几道"
+    expect(warning).toContain('3 道题');
+    expect(warning).toContain('跳过');
+  });
+
+  it('模型返回的选项是字符串数组时会被自动补上 A、B（而不是整组丢掉）', async () => {
+    const materialId = newId();
+    await db.materials.put({
+      id: materialId,
+      title: '材料',
+      sourceType: 'text',
+      content: MATERIAL_TEXT,
+      charCount: MATERIAL_TEXT.length,
+      createdAt: Date.now(),
+    });
+    const { outline, points } = await generateOutline({ materialIds: [materialId], track: 'plc' });
+
+    installChatMock(() =>
+      JSON.stringify({
+        questions: [
+          {
+            knowledgePointNames: ['欧姆定律'],
+            type: 'single',
+            stem: '选项是纯字符串的题',
+            options: ['甲', '乙', '丙'],
+            // 而且答案给的是**选项文本**，不是字母
+            answer: '乙',
+            explanation: '',
+            difficulty: 2,
+          },
+        ],
+      }),
+    );
+
+    const questions = await generateQuestions({
+      outlineId: outline.id,
+      track: 'plc',
+      allocation: [{ pointId: points[0].id, count: 1 }],
+      typeMix: [{ type: 'single', count: 1 }],
+      difficultyMix: '标准',
+    });
+
+    expect(questions).toHaveLength(1);
+    expect(questions[0].options).toEqual([
+      { key: 'A', text: '甲' },
+      { key: 'B', text: '乙' },
+      { key: 'C', text: '丙' },
+    ]);
+    // 关键：答案被反查成了字母，否则用户答对也会被判错
+    expect(questions[0].answer).toBe('B');
+  });
+
   it('模型虚构了不存在的知识点名称时，题目仍然入库（只是关联为空）', async () => {
     const materialId = newId();
     await db.materials.put({
@@ -526,7 +652,10 @@ describe('边界与容错', () => {
             knowledgePointNames: ['这个知识点根本不存在'],
             type: 'single',
             stem: '题干',
-            options: [{ key: 'A', text: '甲' }],
+            options: [
+              { key: 'A', text: '甲' },
+              { key: 'B', text: '乙' },
+            ],
             answer: 'A',
             explanation: '解析',
             difficulty: 2,

@@ -268,7 +268,8 @@ describe('导出的 CSV 能被自己导回来', () => {
   it('导入时能按名称匹配到已有知识点，不会重复创建', async () => {
     const outline = await makeOutline();
     await makePoint(outline.id, '欧姆定律及其应用');
-    const csv = ['题型,题干,答案,知识点', '单选题,题目甲,A,欧姆定律'].join('\n'); // 简称，应模糊匹配到"欧姆定律及其应用"
+    // 简称「欧姆定律」应模糊匹配到已有节点「欧姆定律及其应用」
+    const csv = ['题型,题干,选项A,选项B,答案,知识点', '单选题,题目甲,甲,乙,A,欧姆定律'].join('\n');
 
     const result = await importQuestionsCsv({ text: csv, outlineId: outline.id });
     expect(result.imported).toBe(1);
@@ -279,12 +280,34 @@ describe('导出的 CSV 能被自己导回来', () => {
     expect(q.knowledgePointIds).toHaveLength(1);
   });
 
-  it('没有答案的题会被标出来，不会静默通过', async () => {
+  it('没有答案的题会被跳过并说明原因，不会静默入库', async () => {
     const outline = await makeOutline();
     const csv = ['题型,题干,答案', '单选题,没有答案的题,'].join('\n');
     const result = await importQuestionsCsv({ text: csv, outlineId: outline.id });
-    expect(result.imported).toBe(1);
-    expect(result.warnings.some((w) => w.includes('没有答案'))).toBe(true);
+
+    // 没答案的题永远判不对，留着只会让用户困惑，所以直接不入库
+    expect(result.imported).toBe(0);
+    expect(result.warnings.some((w) => w.includes('跳过'))).toBe(true);
+    expect(result.warnings.some((w) => w.includes('标准答案'))).toBe(true);
+    expect(await db.questions.count()).toBe(0);
+  });
+
+  it('单选题选项不足两个时也会被跳过', async () => {
+    const outline = await makeOutline();
+    const csv = ['题型,题干,选项A,选项B,答案', '单选题,只有两个选项的题,甲,乙,A', '单选题,只有一个选项,甲,,A'].join('\n');
+    const result = await importQuestionsCsv({ text: csv, outlineId: outline.id });
+
+    expect(result.imported).toBe(1); // 两项的那道留下
+    expect(result.warnings.some((w) => w.includes('选项不足'))).toBe(true);
+  });
+
+  it('答案不在选项里时会被跳过', async () => {
+    const outline = await makeOutline();
+    const csv = ['题型,题干,选项A,选项B,答案', '单选题,答案写成了D,甲,乙,D'].join('\n');
+    const result = await importQuestionsCsv({ text: csv, outlineId: outline.id });
+
+    expect(result.imported).toBe(0);
+    expect(result.warnings.some((w) => w.includes('不在选项里'))).toBe(true);
   });
 
   it('目标大纲不存在时报错，而不是把数据写散', async () => {
@@ -460,7 +483,7 @@ describe('从文件导入（界面真正调用的入口）', () => {
 
   it('.txt（制表符分隔）文件也能导', async () => {
     const outline = await makeOutline();
-    const file = new File(['题型\t题干\t答案\n单选题\t欧姆定律的表达式是？\tA'], '题库.txt');
+    const file = new File(['题型\t题干\t选项A\t选项B\t答案\n单选题\t欧姆定律的表达式是？\t甲\t乙\tA'], '题库.txt');
 
     const result = await importQuestionsFromFile({ file, outlineId: outline.id });
 

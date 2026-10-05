@@ -15,6 +15,7 @@
 import { db, newId } from '../db/db';
 import type { ID, KnowledgePoint, Outline, Question, QuestionType } from '../db/types';
 import { QUESTION_TYPE_LABELS } from '../db/types';
+import { isAnswerable } from './quiz';
 
 /* ============================== 底层 CSV ============================== */
 
@@ -509,11 +510,12 @@ export async function importQuestionRows(params: {
   };
 
   const rows: Question[] = [];
+  const skipped: string[] = [];
   parsed.forEach((p, i) => {
     const knowledgePointIds = p.knowledgeNames
       .map(resolvePoint)
       .filter((id): id is ID => Boolean(id));
-    rows.push({
+    const row: Question = {
       id: newId(),
       outlineId,
       knowledgePointIds,
@@ -525,7 +527,15 @@ export async function importQuestionRows(params: {
       difficulty: p.difficulty,
       source: 'imported',
       createdAt: Date.now(),
-    });
+    };
+    // 和 AI 出题走同一套校验：没答案、选项不够、答案不在选项里的题不要入库，
+    // 否则用户在练习时会遇到"答对了判错"或者"根本没有可选项"。
+    const check = isAnswerable(row);
+    if (!check.ok) {
+      skipped.push(check.reason);
+      return;
+    }
+    rows.push(row);
     onProgress?.(i + 1, parsed.length);
   });
 
@@ -538,10 +548,11 @@ export async function importQuestionRows(params: {
   if (createdPoints > 0) {
     warnings.push(`题库里有 ${createdPoints} 个知识点原本不存在，已自动在大纲里新建。`);
   }
-  const noAnswer = rows.filter((r) =>
-    Array.isArray(r.answer) ? r.answer.length === 0 : !String(r.answer).trim(),
-  ).length;
-  if (noAnswer > 0) warnings.push(`有 ${noAnswer} 道题没有答案，做题时无法判分，建议补齐。`);
+  if (skipped.length) {
+    warnings.push(
+      `有 ${skipped.length} 道题格式不完整，已跳过（${[...new Set(skipped)].join('；')}）。请检查这几行的答案与选项列。`,
+    );
+  }
 
   return { imported: rows.length, createdPoints, warnings };
 }

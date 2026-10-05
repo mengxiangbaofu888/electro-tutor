@@ -135,6 +135,7 @@ export function PracticePage() {
     setMessage(null);
     try {
       const diffText = DIFFICULTY_OPTIONS.find((d) => d.value === difficulty)?.label ?? '标准';
+      let warning = '';
       const questions = await generateQuestions({
         outlineId,
         track,
@@ -143,8 +144,14 @@ export function PracticePage() {
         difficultyMix: `${diffText}${instruction.trim() ? `；额外要求：${instruction.trim()}` : ''}`,
         withMaterial,
         onProgress: (d) => setStream((prev) => (prev + d).slice(-3000)),
+        onWarning: (text) => {
+          warning = text;
+        },
       });
-      setMessage({ tone: 'ok', text: `生成 ${questions.length} 道题。` });
+      setMessage({
+        tone: warning ? 'warn' : 'ok',
+        text: warning ? `生成 ${questions.length} 道题。${warning}` : `生成 ${questions.length} 道题。`,
+      });
       await load();
 
       if (thenStart && questions.length) {

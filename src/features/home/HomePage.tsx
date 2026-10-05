@@ -92,6 +92,7 @@ export function HomePage() {
         pointIds,
         targetCount: limit,
         onStatus: setStatus,
+        onWarning: setStatus,
       });
       if (!questions.length) {
         setError('这次没能出出题来，请到「练习」页手动生成一批。');
