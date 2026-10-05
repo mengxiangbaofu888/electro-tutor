@@ -68,13 +68,14 @@ export function SettingsPage() {
 
   function startAdd(kind: 'text' | 'vision') {
     const preset = PROVIDER_PRESETS[providerKey] ?? PROVIDER_PRESETS.custom;
-    const model = kind === 'text' ? (preset.textModels[0] ?? '') : (preset.visionModels[0] ?? '');
     setEditing(
       makeConfig({
         id: newId(),
         name: `${preset.label.split('（')[0]} · ${kind === 'text' ? '文本' : '识图'}`,
         baseUrl: preset.baseUrl,
-        model,
+        // 故意**不**预先填模型：用户明确要求"具体用哪个模型我自己选"。
+        // 弹层里会给出常用模型标签（点一下即可）和联网拉取的完整列表。
+        model: '',
         kind,
         isDefaultText: kind === 'text' && !(configs ?? []).some((c) => c.kind === 'text'),
         isDefaultVision: kind === 'vision' && !(configs ?? []).some((c) => c.kind === 'vision'),
@@ -86,8 +87,15 @@ export function SettingsPage() {
 
   async function save() {
     if (!editing) return;
-    if (!editing.baseUrl.trim() || !editing.model.trim()) {
-      setMessage({ tone: 'error', text: '接口地址和模型 ID 都必须填。' });
+    if (!editing.baseUrl.trim()) {
+      setMessage({ tone: 'error', text: '接口地址必须填（选了预设服务商的话已经自动填好了）。' });
+      return;
+    }
+    if (!editing.model.trim()) {
+      setMessage({
+        tone: 'error',
+        text: '还没选模型。点上面的「常用」标签，或点「从服务商获取模型列表」再选一个。',
+      });
       return;
     }
     await saveLLMConfig({ ...editing, name: editing.name.trim() || editing.model });
@@ -234,6 +242,18 @@ export function SettingsPage() {
   const textConfigs = configs.filter((c) => c.kind === 'text');
   const visionConfigs = configs.filter((c) => c.kind === 'vision');
 
+  // 当前接口地址如果对得上某个预设服务商，就把它的常用模型列出来做快捷标签。
+  // 只是"方便点一下"，不强制——模型最终由用户自己决定。
+  const presetModelChoices = (() => {
+    if (!editing) return [];
+    const want = editing.baseUrl.trim().replace(/\/+$/, '');
+    const hit = Object.values(PROVIDER_PRESETS).find(
+      (p) => p.baseUrl && p.baseUrl.replace(/\/+$/, '') === want,
+    );
+    if (!hit) return [];
+    return editing.kind === 'vision' ? hit.visionModels : hit.textModels;
+  })();
+
   return (
     <>
       {message && <Alert tone={message.tone === 'warn' ? 'warn' : message.tone}>{message.text}</Alert>}
@@ -244,8 +264,18 @@ export function SettingsPage() {
           Key 只保存在这台手机本地，不会上传、也不会进 GitHub。
         </p>
 
-        {textConfigs.length === 0 && visionConfigs.length === 0 && (
-          <Alert tone="warn">还没有配置模型，下面的功能都用不了。先加一个文本模型（推荐 DeepSeek）。</Alert>
+        {configs.length === 0 && (
+          <>
+            <Alert tone="warn">
+              还没有配置模型——出题、批改、讲解全都要用它。
+              点下面这个按钮，把 API Key 填进去就能开始（Key 只存在这台手机本地，不会上传）。
+            </Alert>
+            <div className="btn-row" style={{ marginBottom: 12 }}>
+              <Button variant="primary" onClick={() => startAdd('text')}>
+                🔑 填 API Key（从这里开始）
+              </Button>
+            </div>
+          </>
         )}
 
         {textConfigs.map((c) => (
@@ -282,17 +312,17 @@ export function SettingsPage() {
         ))}
 
         <div className="divider" />
-        <Field label="从预设服务商添加">
+        <Field label="① 先选服务商（下一步才填 Key）">
           <Select value={providerKey} onChange={setProviderKey} options={PROVIDER_OPTIONS} />
         </Field>
         <p className="small faint" style={{ marginTop: -4 }}>
           {PROVIDER_PRESETS[providerKey]?.note}
         </p>
         <div className="btn-row" style={{ marginTop: 8 }}>
-          <Button variant="primary" onClick={() => startAdd('text')}>
-            ＋ 文本模型
+          <Button variant={configs.length ? undefined : 'primary'} onClick={() => startAdd('text')}>
+            ＋ 填 API Key 加文本模型
           </Button>
-          <Button onClick={() => startAdd('vision')}>＋ 识图模型</Button>
+          <Button onClick={() => startAdd('vision')}>＋ 加识图模型（可选）</Button>
         </div>
       </Card>
 
@@ -433,17 +463,29 @@ export function SettingsPage() {
       {/* ---------------- 编辑弹层 ---------------- */}
       <Sheet
         open={Boolean(editing)}
-        title={editing?.kind === 'vision' ? '识图模型配置' : '文本模型配置'}
+        title={editing?.kind === 'vision' ? '配置识图模型（填 Key + 选模型）' : '配置文本模型（填 Key + 选模型）'}
         onClose={() => setEditing(null)}
       >
         {editing && (
           <>
             {message && <Alert tone={message.tone === 'warn' ? 'warn' : message.tone}>{message.text}</Alert>}
-            <Field label="显示名称">
-              <TextInput value={editing.name} onChange={(v) => setEditing({ ...editing, name: v })} />
-            </Field>
             <Field
-              label="接口地址"
+              label="① API Key"
+              hint="只保存在这台手机本地，不会上传。填完会自动联网读一次可用模型列表。"
+            >
+              <TextInput
+                password
+                value={editing.apiKey}
+                placeholder={editing.kind === 'vision' ? '服务商的 Key（识图和文本通常同一个）' : 'sk-...'}
+                onChange={(v) => setEditing({ ...editing, apiKey: v })}
+                onBlur={() => {
+                  if (editing.apiKey.trim() && !modelList.length && busy !== 'models') void doListModels();
+                }}
+              />
+            </Field>
+
+            <Field
+              label="② 接口地址"
               hint={`实际请求：${chatCompletionsUrl(editing.baseUrl || 'https://…/v1')}`}
             >
               <TextInput
@@ -460,28 +502,25 @@ export function SettingsPage() {
                   （192.168.x.x / 10.x.x.x / localhost）不受影响。
                 </Alert>
               )}
-            <Field label="API Key">
-              <TextInput
-                password
-                value={editing.apiKey}
-                placeholder="sk-..."
-                onChange={(v) => setEditing({ ...editing, apiKey: v })}
-              />
-            </Field>
-            <Field label="模型 ID">
+
+            <Field label="③ 模型（你自己选）" hint="点一下标签就是选中它；也能自己手填模型 ID。">
               <TextInput
                 value={editing.model}
-                placeholder="deepseek-chat"
+                placeholder="点下面的标签选，或先点「获取模型列表」"
                 onChange={(v) => setEditing({ ...editing, model: v })}
               />
             </Field>
+            <div className="small muted" style={{ marginTop: -6, marginBottom: 10 }}>
+              当前已选：<b>{editing.model || '（还没选）'}</b>
+            </div>
 
-            {modelList.length > 0 && (
-              <div className="row wrap" style={{ marginBottom: 12 }}>
-                {modelList.slice(0, 30).map((m) => (
+            {presetModelChoices.length > 0 && (
+              <div className="row wrap" style={{ marginBottom: 10 }}>
+                <span className="small faint">常用：</span>
+                {presetModelChoices.map((m) => (
                   <button
                     key={m}
-                    className="badge primary"
+                    className={`badge${editing.model === m ? ' primary' : ''}`}
                     style={{ border: 'none', cursor: 'pointer' }}
                     onClick={() => setEditing({ ...editing, model: m })}
                   >
@@ -490,6 +529,36 @@ export function SettingsPage() {
                 ))}
               </div>
             )}
+
+            <div className="btn-row" style={{ marginBottom: 10 }}>
+              <Button loading={busy === 'models'} disabled={!editing.apiKey.trim()} onClick={doListModels}>
+                {editing.apiKey.trim() ? '从服务商获取模型列表（联网）' : '先填 API Key 才能获取模型列表'}
+              </Button>
+            </div>
+
+            {modelList.length > 0 && (
+              <div style={{ marginBottom: 12 }}>
+                <div className="small faint" style={{ marginBottom: 6 }}>
+                  服务商返回 {modelList.length} 个模型，点一下选用：
+                </div>
+                <div className="row wrap">
+                  {modelList.map((m) => (
+                    <button
+                      key={m}
+                      className={`badge${editing.model === m ? ' primary' : ''}`}
+                      style={{ border: 'none', cursor: 'pointer' }}
+                      onClick={() => setEditing({ ...editing, model: m })}
+                    >
+                      {m}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <Field label="显示名称（随便写，只是给你自己看）">
+              <TextInput value={editing.name} onChange={(v) => setEditing({ ...editing, name: v })} />
+            </Field>
 
             <Field label="温度（越高越有创意，出题建议 0.6~0.8）">
               <input
@@ -539,11 +608,6 @@ export function SettingsPage() {
               <Button loading={busy === 'test'} onClick={doTest}>
                 测试连接
               </Button>
-              {editing.kind === 'text' && (
-                <Button loading={busy === 'models'} variant="ghost" onClick={doListModels}>
-                  获取模型列表
-                </Button>
-              )}
             </div>
           </>
         )}

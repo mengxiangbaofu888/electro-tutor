@@ -330,6 +330,7 @@ npm run test:watch  # 监听模式
 | `src/lib/platform/save-file.test.ts` | **导出文件**：网页版走浏览器下载、App 版走系统保存面板、用户取消不算失败、真正的失败不能吞掉 |
 | `src/lib/services/quiz-normalize.test.ts` | **模型输出的规范化与校验**：选项给成字符串数组时自动补 A、B；答案写成选项文本时反查回字母；缺答案 / 选项不足两个 / 答案不在选项里的题**一律不入库**（这类题要么没法作答、要么答对也判错） |
 | `src/features/practice/PracticePage.test.tsx` | **练习页交互**：打开页面就自动把题量算好、主按钮直接可点（不是一屏灰按钮）；自动分配会按知识点铺开而不是只填一个；手动改过的题量不会被自动计算覆盖 |
+| `src/features/settings/SettingsPage.test.tsx` | **"填 API Key"这条路用户能不能走通**（起因是真实反馈："只给了服务商选择，没地方填 Key"——其实输入框在弹层里，但第一屏找不到入口）：第一屏必须有"填 API Key"的入口、弹层第一个字段就是 Key 且是密码框、**模型不预先填死**、填完 Key 失焦会自动联网拉模型列表、点标签能选中并正确保存、没选模型时明确报错且不存半成品 |
 | `src/features/pages.render.test.tsx` | **每个页面都能渲染**：用服务端首屏渲染确认 10 个页面在无数据时不会白屏（模块导入即崩、hook 用错、空数据越界） |
 | `src/docs-consistency.test.ts` | **文档不会腐烂**：README/docs 里提到的 npm 脚本、相对链接、源码路径都真实存在；知识点数量与内置数据一致；测试文件表与磁盘上的文件一一对应 |
 

@@ -95,12 +95,15 @@ export function TextInput({
   placeholder,
   type = 'text',
   password,
+  onBlur,
 }: {
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
   type?: string;
   password?: boolean;
+  /** 失焦时触发：用于"填完 Key 就自动联网拉模型列表"这类动作 */
+  onBlur?: () => void;
 }) {
   return (
     <input
@@ -109,6 +112,7 @@ export function TextInput({
       placeholder={placeholder}
       autoComplete={password ? 'off' : undefined}
       onChange={(e: ChangeEvent<HTMLInputElement>) => onChange(e.target.value)}
+      onBlur={onBlur}
     />
   );
 }
