@@ -58,6 +58,9 @@ beforeEach(async () => {
   scanResults.length = 0;
   visionMock.mockClear();
   extractMock.mockClear();
+  // 书页草稿存在 localStorage（退出 App 再回来接着扫，这是新加的功能），
+  // 测试之间必须清掉，否则上一个用例的草稿会"串"到下一个用例里。
+  localStorage.clear();
   extractMock.mockImplementation(async (url: string) => ({
     text: '这是一段足够长的微课正文。'.repeat(30),
     title: `网页标题-${url.slice(-4)}`,
@@ -89,6 +92,39 @@ function renderPage() {
     </MemoryRouter>,
   );
 }
+
+describe('草稿自动保存（"退出来就找不到之前解码的进度了"）', () => {
+  it('扫了微课退出页面，再进来草稿还在', async () => {
+    const first = renderPage();
+    const input = screen.getByPlaceholderText('https://…') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'https://x.com/micro/keep' } });
+    fireEvent.click(screen.getByText('加入'));
+    await screen.findByText('https://x.com/micro/keep');
+
+    // 模拟"退出来"：卸载页面（localStorage 里的草稿会留着）
+    first.unmount();
+
+    // 再进来
+    renderPage();
+    expect(await screen.findByText(/已恢复上次没保存完的草稿/)).toBeTruthy();
+    expect(screen.getByText('https://x.com/micro/keep')).toBeTruthy();
+    // 也要如实报出恢复了几个链接
+    expect(screen.getByText(/1 个微课链接/)).toBeTruthy();
+  });
+
+  it('保存成功后草稿被清掉（下次进来是干净的）', async () => {
+    renderPage();
+    const title = screen.getByPlaceholderText('例如：电工技术（第3版）') as HTMLInputElement;
+    fireEvent.change(title, { target: { value: '零基础学电工' } });
+    fireEvent.click(screen.getByText('保存这本教材'));
+    await waitFor(async () => expect(await db.materials.count()).toBe(1));
+
+    // 草稿应被清理：重新渲染不会再提示"已恢复草稿"
+    cleanup();
+    renderPage();
+    expect(screen.queryByText(/已恢复上次没保存完的草稿/)).toBeNull();
+  });
+});
 
 /** 造一个"照片文件" */
 function fakeImage(name = 'cover.jpg') {

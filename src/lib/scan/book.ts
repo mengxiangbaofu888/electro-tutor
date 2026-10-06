@@ -245,23 +245,109 @@ export interface IsbnLookupResult {
 }
 
 /**
+ * 从**豆瓣书目页**里解析书目信息（纯函数，用真实页面做过测试）。
+ *
+ * 为什么以豆瓣为主：实测（2026-10）国内网络下
+ *   · 豆瓣 ISBN 页：**1.1 秒返回**，书名/作者/出版社/出版年全都有
+ *   · Open Library / Google Books：**超时连不上**（这就是用户说"ISBN 补全没用"的原因）
+ *
+ * 豆瓣页面里有两种可用数据，两种都解析：
+ *   1) JSON-LD（最干净）：书名 + 作者数组
+ *   2) `#info` 段落里的 `<span class="pl">出版社:</span>` 这类标签
+ */
+export function parseDoubanBookPage(html: string): Omit<IsbnLookupResult, 'source'> | null {
+  const out: Omit<IsbnLookupResult, 'source'> = {};
+
+  // 1) JSON-LD：书名与作者
+  const ld = /<script type="application\/ld\+json">([\s\S]*?)<\/script>/i.exec(html)?.[1];
+  if (ld) {
+    try {
+      const j = JSON.parse(ld) as {
+        name?: unknown;
+        author?: unknown;
+      };
+      if (typeof j.name === 'string' && j.name.trim()) out.bookTitle = j.name.trim();
+      const names: string[] = [];
+      const pushAuthor = (a: unknown): void => {
+        if (typeof a === 'string' && a.trim()) names.push(a.trim());
+        else if (a && typeof a === 'object' && typeof (a as { name?: unknown }).name === 'string') {
+          names.push(String((a as { name: string }).name).trim());
+        }
+      };
+      if (Array.isArray(j.author)) j.author.forEach(pushAuthor);
+      else pushAuthor(j.author);
+      if (names.length) out.editor = names.slice(0, 2).join('、');
+    } catch {
+      /* JSON-LD 坏了就靠下面的标签解析 */
+    }
+  }
+
+  // 2) `#info` 里的标签：出版社 / 出版年
+  const info = /<div id="info"[\s\S]*?<\/div>/i.exec(html)?.[0] ?? html;
+  const labeled = (label: string): string | undefined => {
+    const re = new RegExp(
+      `<span class="pl">\\s*${label}\\s*:?\\s*</span>([\\s\\S]{0,120}?)(?:<br|</span>|$)`,
+      'i',
+    );
+    const raw = re.exec(info)?.[1];
+    if (!raw) return undefined;
+    const text = raw
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return text || undefined;
+  };
+  const publisher = labeled('出版社');
+  const year = labeled('出版年');
+  if (publisher) out.publisher = publisher;
+  if (year) out.edition = year;
+
+  // 书名兜底：<title>零基础学电工 (豆瓣)</title>
+  if (!out.bookTitle) {
+    const t = /<title>\s*([\s\S]*?)\s*<\/title>/i.exec(html)?.[1];
+    const cleaned = t?.replace(/\(豆瓣\)/g, '').replace(/\s+/g, ' ').trim();
+    if (cleaned) out.bookTitle = cleaned;
+  }
+
+  return Object.keys(out).length ? out : null;
+}
+
+/**
  * 用 ISBN 到公开书目库补全书名/出版社/作者。
  *
- * 说明清楚这是**尽力而为**：
- *   · 国内网络不一定连得上这些境外接口，连不上就返回 null，让用户手填；
- *   · 不填 API Key、不注册账号，只用公开接口；
- *   · 返回的字段仍然要用户核对（数据源本身有错漏）。
+ * **顺序很重要**：豆瓣放第一位（国内能通，实测 1 秒级），
+ * Open Library / Google Books 放后面兜底外文书（国内常连不上）。
+ *
+ * 三种结果要分清楚，别混成一句"查不到"：
+ *   · 查到 → 返回结果（带上来源，界面可以显示"来自豆瓣"）
+ *   · 查遍了都没有这条书 → 返回 null
+ *   · **所有源都连不上**（网络问题）→ 抛错，让界面提示"网络不通，请手填"
  */
-export async function lookupIsbn(isbn: string, timeoutMs = 8000): Promise<IsbnLookupResult | null> {
+export async function lookupIsbn(isbn: string, timeoutMs = 12000): Promise<IsbnLookupResult | null> {
   const clean = normalizeIsbn(isbn);
   if (!clean) return null;
 
-  const withTimeout = async (url: string): Promise<Response | null> => {
+  let anySourceResponded = false;
+
+  const fetchText = async (url: string, accept: string): Promise<string | null> => {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-      const r = await fetch(url, { signal: ctrl.signal, headers: { Accept: 'application/json' } });
-      return r.ok ? r : null;
+      const r = await fetch(url, {
+        signal: ctrl.signal,
+        // 豆瓣会看 UA / Accept-Language；不带的话可能不给内容
+        headers: {
+          Accept: accept,
+          'Accept-Language': 'zh-CN,zh;q=0.9',
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        },
+      });
+      anySourceResponded = true;
+      if (!r.ok) return null;
+      return await r.text();
     } catch {
       return null;
     } finally {
@@ -269,70 +355,70 @@ export async function lookupIsbn(isbn: string, timeoutMs = 8000): Promise<IsbnLo
     }
   };
 
-  // 1) Open Library：公开、无需 Key
-  const ol = await withTimeout(`https://openlibrary.org/isbn/${clean}.json`);
-  if (ol) {
+  // 1) 豆瓣（国内首选）
+  const doubanHtml = await fetchText(`https://book.douban.com/isbn/${clean}/`, 'text/html');
+  if (doubanHtml) {
+    const parsed = parseDoubanBookPage(doubanHtml);
+    if (parsed?.bookTitle) return { ...parsed, source: '豆瓣' };
+  }
+
+  // 2) Open Library（外文书兜底；国内常不通）
+  const olText = await fetchText(`https://openlibrary.org/isbn/${clean}.json`, 'application/json');
+  if (olText) {
     try {
-      const j = (await ol.json()) as Record<string, unknown>;
+      const j = JSON.parse(olText) as Record<string, unknown>;
       const title = typeof j.title === 'string' ? j.title : undefined;
-      let publisher: string | undefined;
-      let edition: string | undefined;
-      if (Array.isArray(j.publishers) && typeof j.publishers[0] === 'string') publisher = j.publishers[0];
-      if (typeof j.publish_date === 'string') edition = j.publish_date;
-      const authors: string[] = [];
-      if (Array.isArray(j.authors)) {
-        for (const a of (j.authors as Array<{ key?: string }>).slice(0, 2)) {
-          if (!a?.key) continue;
-          const ar = await withTimeout(`https://openlibrary.org${a.key}.json`);
-          if (ar) {
-            const aj = (await ar.json()) as { name?: string };
-            if (aj.name) authors.push(aj.name);
-          }
-        }
-      }
-      if (title || publisher || authors.length) {
+      const publisher =
+        Array.isArray(j.publishers) && typeof j.publishers[0] === 'string'
+          ? (j.publishers[0] as string)
+          : undefined;
+      if (title) {
         return {
           bookTitle: title,
           publisher,
-          editor: authors.join('、') || undefined,
-          edition,
+          edition: typeof j.publish_date === 'string' ? j.publish_date : undefined,
           source: 'Open Library',
         };
       }
     } catch {
-      /* 落到下一个数据源 */
+      /* 继续往下试 */
     }
   }
 
-  // 2) Google Books：也公开，但国内常连不上
-  const gb = await withTimeout(
+  // 3) Google Books（国内基本不通，留作最后兜底）
+  const gbText = await fetchText(
     `https://www.googleapis.com/books/v1/volumes?q=isbn:${clean}&maxResults=1`,
+    'application/json',
   );
-  if (gb) {
+  if (gbText) {
     try {
-      const j = (await gb.json()) as {
-        totalItems?: number;
+      const j = JSON.parse(gbText) as {
         items?: Array<{ volumeInfo?: Record<string, unknown> }>;
       };
       const info = j.items?.[0]?.volumeInfo;
-      if (info) {
-        const arr = (v: unknown): string | undefined =>
-          Array.isArray(v) && typeof v[0] === 'string' ? v[0] : undefined;
-        const title = typeof info.title === 'string' ? info.title : undefined;
-        if (title) {
-          return {
-            bookTitle: title,
-            publisher: typeof info.publisher === 'string' ? info.publisher : undefined,
-            editor: arr(info.authors),
-            edition: typeof info.publishedDate === 'string' ? info.publishedDate : undefined,
-            source: 'Google Books',
-          };
-        }
+      const title = info && typeof info.title === 'string' ? info.title : undefined;
+      if (title) {
+        return {
+          bookTitle: title,
+          publisher: typeof info?.publisher === 'string' ? info.publisher : undefined,
+          editor:
+            Array.isArray(info?.authors) && typeof info.authors[0] === 'string'
+              ? (info.authors as string[]).slice(0, 2).join('、')
+              : undefined,
+          edition: typeof info?.publishedDate === 'string' ? info.publishedDate : undefined,
+          source: 'Google Books',
+        };
       }
     } catch {
       /* 放弃 */
     }
   }
 
+  if (!anySourceResponded) {
+    throw new Error(
+      '连不上书目库（豆瓣/Open Library/Google Books 都没响应）。' +
+        '可能是网络问题；网页版还可能被浏览器跨域挡住（App 版不受影响）。可以手动填书名，或者稍后再试。',
+    );
+  }
   return null;
 }

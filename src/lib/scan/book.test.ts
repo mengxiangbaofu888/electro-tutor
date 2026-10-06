@@ -6,6 +6,8 @@
  *      解析必须接得住，并且**看不清就留空、不猜**；
  *   2) 扫码结果分类要严：ISBN 校验位不对就不能当 ISBN 收下。
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { MicroLesson } from '../db/types';
 import {
@@ -16,6 +18,7 @@ import {
   isUsableContent,
   mergeMicroLessons,
   parseCoverReading,
+  parseDoubanBookPage,
 } from './book';
 
 function micro(url: string, title = '微课', addedAt = 1): MicroLesson {
@@ -136,6 +139,36 @@ describe('从链接猜默认标题', () => {
 
   it('不是网址时给个兜底标题', () => {
     expect(guessMicroLessonTitle('乱七八糟')).toBe('微课');
+  });
+});
+
+describe('用 ISBN 补全书目（豆瓣，国内能通的那个源）', () => {
+  // 真实数据：从 book.douban.com/isbn/9787111589549/ 抓下来裁剪的片段。
+  // 起因：用户反馈"ISBN 补全没用" —— 实测原因是原来只用 Open Library / Google Books，
+  // 这两个在国内**直接超时**（实测 9 秒无响应），而豆瓣 1.1 秒就返回了完整书目。
+  const html = readFileSync(
+    join(process.cwd(), 'src/lib/scan/__fixtures__/douban-9787111589549.html'),
+    'utf8',
+  );
+
+  it('真实豆瓣页面：书名 / 作者 / 出版社 / 出版年 都能解出来', () => {
+    const r = parseDoubanBookPage(html);
+    expect(r).not.toBeNull();
+    expect(r!.bookTitle).toBe('零基础学电工');
+    expect(r!.editor).toBe('韩雪涛');
+    expect(r!.publisher).toBe('机械工业出版社');
+    expect(r!.edition).toBe('2018-2');
+  });
+
+  it('JSON-LD 坏掉时，还能从标签和 <title> 兜回来', () => {
+    const broken = html.replace(/<script type="application\/ld\+json">[\s\S]*?<\/script>/, '');
+    const r = parseDoubanBookPage(broken);
+    expect(r!.bookTitle).toBe('零基础学电工'); // 来自 <title>，并去掉"(豆瓣)"
+    expect(r!.publisher).toBe('机械工业出版社'); // 来自 #info 标签
+  });
+
+  it('不是书目页（没有书名也没有标签）→ 返回 null', () => {
+    expect(parseDoubanBookPage('<html><body><p>什么都没有</p></body></html>')).toBeNull();
   });
 });
 

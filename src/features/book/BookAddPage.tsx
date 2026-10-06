@@ -12,7 +12,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { db, getDefaultLLM, newId } from '../../lib/db/db';
-import type { BookMeta, Material, MicroLesson, TrackId } from '../../lib/db/types';
+import type { BookMeta, LLMConfig, Material, MicroLesson, TrackId } from '../../lib/db/types';
 import { TRACK_LABELS } from '../../lib/db/types';
 import { visionExtract } from '../../lib/llm/client';
 import { extractFromUrl } from '../../lib/extract';
@@ -38,6 +38,8 @@ const TRACK_OPTIONS = (Object.keys(TRACK_LABELS) as TrackId[]).map((k) => ({
 
 /** 一次最多扫多少张（用户实测会一次选上百张，这里不再卡在 12 张） */
 const MAX_SCAN_BATCH = 100;
+/** 书页草稿存在哪（退出 App 再回来也能接着扫） */
+const DRAFT_KEY = 'electro-tutor:book-draft';
 /** 一批扫描的总时限：到点就停下来汇报，让用户再点一次继续（而不是让界面卡死） */
 const SCAN_TOTAL_BUDGET_MS = 150_000;
 /** 单张的时间上限：批量场景用小的，免得个别难解的照片拖住整批 */
@@ -59,8 +61,98 @@ export function BookAddPage({ materialId: propId }: { materialId?: string } = {}
   const [manualUrl, setManualUrl] = useState('');
   /** 正在编辑的那条材料的创建时间（更新时保留，不改成"今天新建"） */
   const [createdAt, setCreatedAt] = useState<number | null>(null);
+  /** 抓微课内容的结果：**常驻显示**（用户反馈"转两圈就没了，不知道到哪步"） */
+  const [fetchResults, setFetchResults] = useState<
+    { title: string; url: string; detail: string; ok: boolean }[]
+  >([]);
+  /** 没有识图模型时，是否可以用现有文本模型的 Key 一键加一个（用户只有文本模型） */
+  const [canReuseKey, setCanReuseKey] = useState(false);
+
+  /**
+   * 用**现有文本模型同一个 Key** 加一个识图模型。
+   * 有些模型（DeepSeek 的 deepseek-flash、智谱 GLM、通义 Qwen-VL）本身就能看图，
+   * 没必要让用户再去别处申请 Key —— 那是他被"还得自己填"卡住的真正原因。
+   */
+  async function reuseKeyForVision() {
+    setBusy('vision');
+    setMessage(null);
+    try {
+      const textCfg = await getDefaultLLM('text');
+      if (!textCfg) {
+        setMessage({ tone: 'error', text: '还没有文本模型配置，请先到「我的」里加一个。' });
+        return;
+      }
+      const cfg: LLMConfig = {
+        ...textCfg,
+        id: newId(),
+        kind: 'vision',
+        name: `${textCfg.name}（兼识图）`,
+        // 同一个地址、同一个 Key、同一个模型名：能不能看图由服务商决定，
+        // 点「测试连接」会真发一张图去验证，不行会明确告诉你
+        createdAt: Date.now(),
+      };
+      await db.llmConfigs.put(cfg);
+      setCanReuseKey(false);
+      setMessage({
+        tone: 'ok',
+        text:
+          `已添加识图模型「${cfg.name}」（用的是同一个 Key 和模型）。` +
+          '建议先到「我的」点一下它的「测试连接」——那会真发一张图验证能不能看图；' +
+          '然后回到这里重新拍一次书皮。',
+      });
+    } catch (e) {
+      setMessage({ tone: 'error', text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setBusy('');
+    }
+  }
 
   const patch = (p: Partial<BookMeta>) => setMeta((prev) => ({ ...prev, ...p }));
+
+  /* ------------------------------ 草稿自动保存 ------------------------------ */
+  // 用户反馈："添加微课不能退出来，一退出来回去就找不到之前解码的进度了"。
+  // 所以每次改动都把表单写到本地（不含封面大图，免得占满存储），
+  // 重新进来时自动恢复，接着扫就行。
+
+  useEffect(() => {
+    if (materialId) return; // 编辑已有教材：数据本来就在库里，不掺草稿
+    try {
+      const raw = localStorage.getItem(DRAFT_KEY);
+      if (!raw) return;
+      const d = JSON.parse(raw) as { meta?: BookMeta; track?: TrackId };
+      const m = d?.meta;
+      if (!m) return;
+      if (m.bookTitle || m.isbn || (m.microLessons?.length ?? 0) > 0) {
+        setMeta(m);
+        if (d.track) setTrack(d.track);
+        setMessage({
+          tone: 'ok',
+          text:
+            `已恢复上次没保存完的草稿：${m.bookTitle || '(还没填书名)'}` +
+            `、${m.microLessons?.length ?? 0} 个微课链接。接着扫/接着填都行。`,
+        });
+      }
+    } catch {
+      /* 草稿坏了就当没有 */
+    }
+  }, [materialId]);
+
+  useEffect(() => {
+    if (materialId) return;
+    try {
+      const hasContent = Boolean(
+        meta.bookTitle || meta.isbn || meta.coverDataUrl || (meta.microLessons?.length ?? 0) > 0,
+      );
+      if (!hasContent) {
+        localStorage.removeItem(DRAFT_KEY);
+        return;
+      }
+      // 封面照片是 base64 大图，存进 localStorage 容易顶满；草稿只留文字与微课清单
+      localStorage.setItem(DRAFT_KEY, JSON.stringify({ meta: { ...meta, coverDataUrl: undefined }, track }));
+    } catch {
+      /* 存储满了就算了，不影响主流程 */
+    }
+  }, [meta, track, materialId]);
 
   /* ------------------------------ 编辑已有教材 ------------------------------ */
 
@@ -99,13 +191,21 @@ export function BookAddPage({ materialId: propId }: { materialId?: string } = {}
       patch({ coverDataUrl: dataUrls[0] });
 
       if (!vision) {
+        // 用户反馈："书皮添加进去了也没有用，还是得自己填详细信息。"
+        // 原因多半是**没配识图模型**（他只有文本模型），而让他再去申请一个 Key 太麻烦。
+        // 所以这里给一条一键通道：复用已有的 Key 加一个识图模型。
+        const textCfg = await getDefaultLLM('text');
         setMessage({
           tone: 'warn',
           text:
             '照片已存下，但还没有配置识图模型，所以没法自动认字。' +
-            '到「我的 → 大模型配置」加一个视觉模型（推荐智谱 glm-4v-flash，免费档），' +
-            '或者直接在下面手动填书名、出版社。',
+            (textCfg
+              ? `点下面的「用同一个 Key 加识图模型」就能用你现有的 ${textCfg.model} 试试` +
+                '（DeepSeek 的 deepseek-flash 本身就支持看图）；也可以直接在下面手动填书名。'
+              : '到「我的 → 大模型配置」加一个视觉模型（推荐智谱 glm-4v-flash，免费档），' +
+                '或者直接在下面手动填书名、出版社。'),
         });
+        setCanReuseKey(Boolean(textCfg));
         return;
       }
       setProgress(
@@ -250,11 +350,19 @@ export function BookAddPage({ materialId: propId }: { materialId?: string } = {}
       }
 
       setProgress(`正在逐个打开微课页面（共 ${todo.length} 个）…`);
+      setFetchResults(todo.map((l) => ({ title: l.title, url: l.url, ok: false, detail: '排队中…' })));
       const result = await collectMicroLessonMaterials({
         lessons: todo,
         extract: extractFromUrl,
-        onProgress: (done, total, lesson) =>
-          setProgress(`正在抓第 ${done + 1} / ${total} 个：${lesson.title}`),
+        onProgress: (done, total, lesson) => {
+          setProgress(`正在抓第 ${done + 1} / ${total} 个：${lesson.title}`);
+          // 每开始一个就在清单里标出"正在抓"，用户随时知道到哪步了
+          setFetchResults((prev) =>
+            prev.map((r) =>
+              r.url === lesson.url && r.detail === '排队中…' ? { ...r, detail: '正在抓…' } : r,
+            ),
+          );
+        },
       });
 
       for (const item of result.ok) {
@@ -269,6 +377,18 @@ export function BookAddPage({ materialId: propId }: { materialId?: string } = {}
           createdAt: Date.now(),
         });
       }
+
+      // 结果**常驻**：每个链接一行，成功/失败与原因都留着（不再"转两圈就没了"）
+      const okByUrl = new Map(result.ok.map((o) => [o.lesson.url, o.content.length]));
+      const failByUrl = new Map(result.failed.map((f) => [f.lesson.url, f.reason]));
+      setFetchResults((prev) =>
+        prev.map((r) => {
+          const chars = okByUrl.get(r.url);
+          if (chars !== undefined) return { ...r, ok: true, detail: `已抓到 ${chars} 字，存成材料` };
+          const reason = failByUrl.get(r.url);
+          return { ...r, ok: false, detail: reason ?? '没抓到' };
+        }),
+      );
 
       const parts = [`抓到 ${result.ok.length} 篇正文，已存成材料`];
       if (skipped) parts.push(`${skipped} 个之前抓过、跳过`);
@@ -298,17 +418,19 @@ export function BookAddPage({ materialId: propId }: { materialId?: string } = {}
 
   /* ------------------------------ 用 ISBN 联网补全 ------------------------------ */
 
-  async function handleLookup() {
+  async function handleLookup(auto = false) {
     if (!meta.isbn) return;
+    if (busy === 'lookup') return;
     setBusy('lookup');
-    setMessage(null);
+    if (!auto) setMessage(null);
+    else setMessage({ tone: 'ok', text: `正在用 ISBN ${formatIsbnSafe(meta.isbn)} 联网查书目…` });
     try {
       const r = await lookupIsbn(meta.isbn);
       if (!r) {
         setMessage({
           tone: 'warn',
           text:
-            '公开书目库没查到这本（或者当前网络连不上境外接口）。' +
+            `书名库里没有这个 ISBN（${formatIsbnSafe(meta.isbn)}）的记录。` +
             '书名、出版社直接手填就行，不影响使用。',
         });
         return;
@@ -321,8 +443,53 @@ export function BookAddPage({ materialId: propId }: { materialId?: string } = {}
       });
       setMessage({
         tone: 'ok',
-        text: `已从 ${r.source} 补全，请核对后保存（第三方数据也可能有错）。`,
+        text:
+          `已从「${r.source}」补全：${r.bookTitle ?? ''}` +
+          `${r.editor ? ` / ${r.editor}` : ''}${r.publisher ? ` / ${r.publisher}` : ''}` +
+          `${r.edition ? ` / ${r.edition}` : ''}。（第三方数据也可能有错，请核对）`,
       });
+    } catch (e) {
+      setMessage({ tone: 'error', text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setBusy('');
+    }
+  }
+
+  /* ------------------------------ 专扫条形码（ISBN） ------------------------------ */
+
+  /**
+   * 用户反馈："这个（ISBN）是在条形码上面的，最好加一个扫条形码处"。
+   * 所以给一个**专门扫条码**的入口：拍/选一张条码照片 → 只认 ISBN，
+   * 认出来就直接填进 ISBN 字段并自动联网补全，不用再手点一次。
+   */
+  async function handleBarcodeScan(file: File) {
+    setBusy('barcode');
+    setMessage({ tone: 'ok', text: '正在识别条形码…' });
+    try {
+      const hit = await decodeImageFile(file, (phase) => {
+        if (phase === 'tiles') setMessage({ tone: 'ok', text: '整张没认出，正在切块放大细找…' });
+      });
+      if (!hit) {
+        setMessage({
+          tone: 'warn',
+          text: '没认出条形码。小技巧：**只拍条码那一小块**、让条码占满画面、对焦清楚、别反光。',
+        });
+        return;
+      }
+      const target = classifyScanForBook(hit.text);
+      if (target.kind !== 'isbn') {
+        setMessage({
+          tone: 'warn',
+          text: `认出的是「${hit.text.slice(0, 40)}」，不是 ISBN 条码。请对着书背的条形码拍（ISBN 通常印在条码上方）。`,
+        });
+        return;
+      }
+      patch({ isbn: target.isbn });
+      setMessage({
+        tone: 'ok',
+        text: `已识别 ISBN ${formatIsbnSafe(target.isbn)}（校验位通过），正在联网补全书目…`,
+      });
+      await handleLookup(true);
     } catch (e) {
       setMessage({ tone: 'error', text: e instanceof Error ? e.message : String(e) });
     } finally {
@@ -354,6 +521,12 @@ export function BookAddPage({ materialId: propId }: { materialId?: string } = {}
         book: { ...meta, updatedAt: Date.now() },
       };
       await db.materials.put(row);
+      // 存好了就把草稿清掉：否则下次进来还会"恢复"这本已经保存过的书（测试抓到的遗漏）
+      try {
+        localStorage.removeItem(DRAFT_KEY);
+      } catch {
+        /* 清不掉也不影响主流程 */
+      }
       setMessage({
         tone: 'ok',
         text: editingExisting
@@ -395,6 +568,11 @@ export function BookAddPage({ materialId: propId }: { materialId?: string } = {}
               }}
             />
           </label>
+          {canReuseKey && (
+            <Button loading={busy === 'vision'} onClick={() => void reuseKeyForVision()}>
+              用同一个 Key 加识图模型
+            </Button>
+          )}
         </div>
         {meta.coverDataUrl && (
           <div style={{ marginTop: 10 }}>
@@ -434,18 +612,37 @@ export function BookAddPage({ materialId: propId }: { materialId?: string } = {}
           label="ISBN"
           hint={
             meta.isbn
-              ? `已识别：${formatIsbnSafe(meta.isbn)}（已通过校验位检查）`
-              : '扫书背的条码能得到；也可以手填'
+              ? `已识别：${formatIsbnSafe(meta.isbn)}（已通过校验位检查）—— 离开输入框会自动联网补全`
+              : '扫书背的条码能得到；也可以手填（ISBN 通常印在条形码上方）'
           }
         >
           <TextInput
             value={meta.isbn ?? ''}
             placeholder="978-7-111-63650-2"
             onChange={(v) => patch({ isbn: v.replace(/[^0-9Xx]/g, '') || undefined })}
+            // 用户反馈："这个数字我输入完半天没有用，他也不会自己补全"
+            // → 填完离开输入框就自动查，不用再手点按钮
+            onBlur={() => {
+              if (meta.isbn && meta.isbn.length >= 10) void handleLookup(true);
+            }}
           />
         </Field>
         <div className="btn-row">
-          <Button loading={busy === 'lookup'} disabled={!meta.isbn} onClick={handleLookup}>
+          <label className="btn ghost">
+            {busy === 'barcode' ? '识别条码中…' : '📷 扫条形码（ISBN）'}
+            <input
+              type="file"
+              accept="image/*"
+              capture="environment"
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) void handleBarcodeScan(f);
+                e.target.value = '';
+              }}
+            />
+          </label>
+          <Button loading={busy === 'lookup'} disabled={!meta.isbn} onClick={() => void handleLookup()}>
             用 ISBN 联网补全书目
           </Button>
         </div>
@@ -555,6 +752,24 @@ export function BookAddPage({ materialId: propId }: { materialId?: string } = {}
               <b>你不用一页页点开看</b>。抓不到正文的（多半是视频页或要登录）
               会明确告诉你原因和下一步怎么办。
             </p>
+
+            {/* 抓取结果常驻：用户反馈"转两圈就没了，也不知道到哪步了" */}
+            {fetchResults.length > 0 && (
+              <div style={{ marginTop: 8 }}>
+                <div className="small faint" style={{ marginBottom: 4 }}>
+                  抓取结果（每个链接一行，抓完不会消失）：
+                </div>
+                <div className="col" style={{ gap: 4, maxHeight: 220, overflowY: 'auto' }}>
+                  {fetchResults.map((r) => (
+                    <div key={r.url} className="small">
+                      {r.ok ? '✅' : r.detail === '正在抓…' ? '⏳' : r.detail === '排队中…' ? '…' : '⚠️'}{' '}
+                      <b>{r.title}</b>
+                      <span className="faint"> · {r.detail}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </>
         )}
       </Card>
