@@ -14,13 +14,15 @@ import { ReportPage } from './features/report/ReportPage';
 import { WrongBookPage } from './features/wrong/WrongBookPage';
 import { KnowledgePage } from './features/knowledge/KnowledgePage';
 import { SettingsPage } from './features/settings/SettingsPage';
+import { BankPage } from './features/bank/BankPage';
 import { GenerationBanner } from './features/practice/GenerationBanner';
 
 const NAV = [
   { to: '/', icon: '🏠', label: '首页' },
-  { to: '/materials', icon: '📚', label: '材料' },
-  { to: '/outlines', icon: '🗺️', label: '大纲' },
+  { to: '/bank', icon: '🗃️', label: '题库' },
   { to: '/practice', icon: '✏️', label: '练习' },
+  { to: '/outlines', icon: '🗺️', label: '大纲' },
+  { to: '/materials', icon: '📚', label: '材料' },
   { to: '/me', icon: '👤', label: '我的' },
 ];
 
@@ -31,6 +33,7 @@ function titleFor(pathname: string): { title: string; back?: boolean } | null {
   if (pathname === '/outlines') return { title: '知识大纲' };
   if (pathname.startsWith('/outlines/')) return { title: '编辑大纲', back: true };
   if (pathname === '/practice') return { title: '出题与练习' };
+  if (pathname === '/bank') return { title: '题库' };
   if (pathname.startsWith('/exam/')) return { title: '答题中' };
   if (pathname.startsWith('/report/')) return { title: '学习报告', back: true };
   if (pathname === '/wrong') return { title: '错题本', back: true };
@@ -67,6 +70,7 @@ export default function App() {
           <Route path="/outlines" element={<OutlineListPage />} />
           <Route path="/outlines/:outlineId" element={<OutlineDetailPage />} />
           <Route path="/practice" element={<PracticePage />} />
+          <Route path="/bank" element={<BankPage />} />
           <Route path="/exam/:attemptId" element={<ExamPage />} />
           <Route path="/report/:attemptId" element={<ReportPage />} />
           <Route path="/wrong" element={<WrongBookPage />} />

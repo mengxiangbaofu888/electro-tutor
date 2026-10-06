@@ -123,7 +123,8 @@ body {
   bottom: 0;
   z-index: 30;
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  /* 题库进了一级导航：这个 App 的主目标就是刷题，题库必须一眼可见 */
+  grid-template-columns: repeat(6, 1fr);
   height: calc(var(--nav-h) + var(--safe-bottom));
   padding-bottom: var(--safe-bottom);
   background: rgba(19, 28, 49, 0.96);

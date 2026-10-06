@@ -41,7 +41,7 @@ export function GenerationBanner() {
         <div className="small faint">
           {active
             ? '出题在后台继续，切页面不会中断'
-            : `已存进题库${gen.thenStart ? '，去练习页就能用' : ''}`}
+            : `已存进题库${gen.thenStart ? '，点「去题库看题」直接开始' : ''}`}
         </div>
       </div>
       <div className="row" style={{ gap: 6 }}>
@@ -61,8 +61,8 @@ export function GenerationBanner() {
           </Button>
         ) : (
           <>
-            <Button size="sm" variant="primary" onClick={() => navigate('/practice')}>
-              去练习
+            <Button size="sm" variant="primary" onClick={() => navigate('/bank')}>
+              去题库看题
             </Button>
             <Button size="sm" variant="ghost" onClick={resetGeneration}>
               知道了
