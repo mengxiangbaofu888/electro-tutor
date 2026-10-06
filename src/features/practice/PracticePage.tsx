@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { db, getDefaultLLM } from '../../lib/db/db';
-import type { KnowledgePoint, Outline, Question, QuestionType, TrackId } from '../../lib/db/types';
+import type { Attempt, KnowledgePoint, Outline, Question, QuestionType, TrackId } from '../../lib/db/types';
 import { QUESTION_TYPE_LABELS, TRACK_LABELS } from '../../lib/db/types';
 import { getOutlinePoints, listOutlines } from '../../lib/services/outline';
 import { createPaper, listAllQuestions, startAttempt } from '../../lib/services/quiz';
@@ -95,6 +95,11 @@ export function PracticePage() {
   const [gen, setGen] = useState(getGenerationState());
   useEffect(() => subscribeGeneration(setGen), []);
   const genActive = isGenerationActive(gen);
+  /** 上次没答完的卷子（答题中暂停退出的，从这里接着做） */
+  const [unfinished, setUnfinished] = useState<Attempt | null>(null);
+  /** 每道题最近一次的作答结果（true 答对 / false 答错 / 没记录 = 还没做过） */
+  const [lastResult, setLastResult] = useState<Map<string, boolean>>(new Map());
+  const [bankFilter, setBankFilter] = useState<'todo' | 'correct' | 'wrong' | 'all'>('todo');
   const [message, setMessage] = useState<{ tone: 'ok' | 'error' | 'warn'; text: string } | null>(null);
   const [bankCount, setBankCount] = useState(0);
   const [hasModel, setHasModel] = useState(true);
@@ -105,6 +110,20 @@ export function PracticePage() {
     setOutlines(os);
     setHasModel(Boolean(cfg));
     setBankCount(count);
+    // 找最近一次没答完的卷子（答题中暂停退出的），给一个"继续答题"的入口
+    const all = await db.attempts.toArray();
+    const open = all
+      .filter((a) => !a.finishedAt)
+      .sort((a, b) => b.startedAt - a.startedAt)[0];
+    setUnfinished(open ?? null);
+    // 顺带算出"哪些题做过/做对/做错"，给下面的题库分区用
+    const lastResult = new Map<string, boolean>();
+    for (const a of all) {
+      for (const rec of a.answers ?? []) {
+        if (typeof rec.isCorrect === 'boolean') lastResult.set(rec.questionId, rec.isCorrect);
+      }
+    }
+    setLastResult(lastResult);
     return os;
   }, []);
 
@@ -235,13 +254,34 @@ export function PracticePage() {
     setBusy('bank');
     setMessage(null);
     try {
-      const pool = await listAllQuestions();
-      const filtered = outlineId ? pool.filter((q) => q.outlineId === outlineId) : pool;
-      if (!filtered.length) {
+      const pool = (await listAllQuestions()).filter((q) => !outlineId || q.outlineId === outlineId);
+      if (!pool.length) {
         setMessage({ tone: 'warn', text: '题库里还没有题目，先用上面的方式生成一批。' });
         return;
       }
-      const picked = [...filtered].sort(() => Math.random() - 0.5).slice(0, count);
+      // 按当前筛选抽题：比如"专练没做过的"/"专练做错的"
+      const picked = [...pool]
+        .filter((q) => {
+          const r = lastResult.get(q.id);
+          if (bankFilter === 'todo') return r === undefined;
+          if (bankFilter === 'correct') return r === true;
+          if (bankFilter === 'wrong') return r === false;
+          return true;
+        })
+        .sort(() => Math.random() - 0.5)
+        .slice(0, count);
+      if (!picked.length) {
+        setMessage({
+          tone: 'warn',
+          text:
+            bankFilter === 'wrong'
+              ? '这个筛选下没有题（没有做错过的）。换一个筛选，或先去生成一批新题。'
+              : bankFilter === 'todo'
+                ? '这个筛选下没有题（都做过了）。换"做错过的"再练，或生成新题。'
+                : '这个筛选下没有题。',
+        });
+        return;
+      }
       const paper = await createPaper({
         title: `题库练习 · ${new Date().toLocaleDateString('zh-CN')}`,
         questionIds: picked.map((q) => q.id),
@@ -292,6 +332,20 @@ export function PracticePage() {
         </Card>
       ) : (
         <>
+          {/* 上次没答完的卷子：答到一半退出/切走的，从这里接着做 */}
+          {unfinished && (
+            <Card title="⏸ 有一次没答完的卷子">
+              <div className="small muted" style={{ marginTop: 0 }}>
+                {unfinished.paperTitle} · 开始于{' '}
+                {new Date(unfinished.startedAt).toLocaleString('zh-CN')} · 已答的题都存着
+              </div>
+              <div className="btn-row" style={{ marginTop: 8 }}>
+                <Button variant="primary" onClick={() => navigate(`/exam/${unfinished.id}`)}>
+                  继续答题
+                </Button>
+              </div>
+            </Card>
+          )}
           <Card title="🎯 选择大纲与题量">
             <Field label="知识大纲">
               <Select
@@ -480,7 +534,30 @@ export function PracticePage() {
           <Card title="📚 题库直接练习" extra={<Badge>{bankCount} 道</Badge>}>
             <p className="small muted" style={{ marginTop: 0 }}>
               不调用大模型，直接从已有题目里抽题做，省 token 也更快。
+              先选练哪一类（生成出来还没做的 / 做对过的 / 做错过的），再点题量。
             </p>
+            <div className="row wrap" style={{ gap: 6, marginBottom: 8 }}>
+              {(
+                [
+                  ['todo', '还没做过的'],
+                  ['correct', '做对过的'],
+                  ['wrong', '做错过的'],
+                  ['all', '全部'],
+                ] as const
+              ).map(([key, label]) => (
+                <Button
+                  key={key}
+                  size="sm"
+                  variant={bankFilter === key ? 'primary' : 'ghost'}
+                  onClick={() => setBankFilter(key)}
+                >
+                  {label}
+                </Button>
+              ))}
+              <Button size="sm" variant="ghost" onClick={() => navigate('/wrong')}>
+                只练错题本 ›
+              </Button>
+            </div>
             <CountPicker busy={busy === 'bank'} onPick={(n) => void practiceFromBank(n)} />
             <div className="btn-row" style={{ marginTop: 8 }}>
               <Button variant="ghost" onClick={() => navigate('/wrong')}>

@@ -9,7 +9,7 @@
  * 界面上刻意把"手动填"放在同等位置：识图和扫码都会出错，
  * 用户必须能直接改，而不是被迫接受一个错的书名。
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { db, getDefaultLLM, newId } from '../../lib/db/db';
 import type { BookMeta, LLMConfig, Material, MicroLesson, TrackId } from '../../lib/db/types';
@@ -67,6 +67,10 @@ export function BookAddPage({ materialId: propId }: { materialId?: string } = {}
   >([]);
   /** 没有识图模型时，是否可以用现有文本模型的 Key 一键加一个（用户只有文本模型） */
   const [canReuseKey, setCanReuseKey] = useState(false);
+  /** 批量扫码：用户点"停止"用（扫码中途不想扫了） */
+  const stopScanRef = useRef(false);
+  /** 每张照片的解码结果（用户反馈："我不知道他差的那一张是哪一张"） */
+  const [imgResults, setImgResults] = useState<{ name: string; ok: boolean; detail: string }[]>([]);
 
   /**
    * 用**现有文本模型同一个 Key** 加一个识图模型。
@@ -249,20 +253,20 @@ export function BookAddPage({ materialId: propId }: { materialId?: string } = {}
     let unknown = 0;
     let failed = 0;
     let processed = 0;
+    let stopped = false; // 超时或用户点了"停止"
+    /** 每张照片的结果（用户反馈："我不知道他差的那一张是哪一张"） */
+    const imgResults: { name: string; ok: boolean; detail: string }[] = [];
     const deadline = Date.now() + SCAN_TOTAL_BUDGET_MS;
 
     try {
       for (let i = 0; i < list.length; i++) {
         if (Date.now() > deadline) {
-          setMessage({
-            tone: 'warn',
-            text:
-              `已处理 ${processed} 张（找到 ${found.length} 个微课链接` +
-              (isbn ? `、ISBN ${formatIsbnSafe(isbn)}` : '') +
-              `）。为免卡太久先停一下——**再点一次可以继续扫剩下的 ${list.length - i} 张**。` +
-              '小技巧：一张只拍一个码、靠近一点，扫得又快又准。',
-          });
-          return;
+          stopped = true;
+          break;
+        }
+        if (stopScanRef.current) {
+          stopped = true;
+          break;
         }
         setProgress(`正在解码第 ${i + 1} / ${list.length} 张…（已找到 ${found.length} 个微课链接）`);
         let hit = null;
@@ -277,17 +281,20 @@ export function BookAddPage({ materialId: propId }: { materialId?: string } = {}
           }, SCAN_PER_IMAGE_BUDGET_MS);
         } catch {
           failed += 1;
+          imgResults.push({ name: list[i].name, ok: false, detail: '读图出错' });
           continue;
         } finally {
           processed += 1;
         }
         if (!hit) {
           failed += 1;
+          imgResults.push({ name: list[i].name, ok: false, detail: '没解出码（多半是糊/远/反光）' });
           continue;
         }
         const target = classifyScanForBook(hit.text);
         if (target.kind === 'isbn') {
           isbn = target.isbn;
+          imgResults.push({ name: list[i].name, ok: true, detail: `ISBN ${formatIsbnSafe(target.isbn)}` });
         } else if (target.kind === 'microLesson') {
           found.push({
             id: newId(),
@@ -295,13 +302,21 @@ export function BookAddPage({ materialId: propId }: { materialId?: string } = {}
             title: guessMicroLessonTitle(target.url),
             addedAt: Date.now() + found.length,
           });
+          imgResults.push({ name: list[i].name, ok: true, detail: '微课链接' });
         } else {
           unknown += 1;
+          imgResults.push({ name: list[i].name, ok: false, detail: '不是 ISBN 也不是微课码' });
         }
       }
-
+    } finally {
+      // **关键**：不管是扫完、超时还是手动停止，都要把已扫到的先保存进清单。
+      // 以前超时那条路直接 return，扫到的东西全丢了 —— 用户只能全部重扫（真实踩到）。
       if (isbn) patch({ isbn });
       if (found.length) patch({ microLessons: mergeMicroLessons(meta.microLessons, found) });
+      setImgResults(imgResults);
+      setBusy('');
+      setProgress('');
+      stopScanRef.current = false;
 
       const parts: string[] = [];
       if (isbn) parts.push(`ISBN ${formatIsbnSafe(isbn)}`);
@@ -309,24 +324,31 @@ export function BookAddPage({ materialId: propId }: { materialId?: string } = {}
       if (unknown) parts.push(`${unknown} 个码的内容既不是 ISBN 也不是网址`);
       if (failed) parts.push(`${failed} 张没能解出码`);
 
+      const remain = Math.max(0, list.length - processed);
+      const head = stopped
+        ? `已停下：处理了 ${processed} 张，还剩 ${remain} 张没扫。`
+        : `识别完成（${processed} 张）：`;
       setMessage(
         parts.length
           ? {
               tone: failed && !found.length && !isbn ? 'warn' : 'ok',
               text:
-                `识别完成：${parts.join('，')}。` +
-                (failed
-                  ? '解不出来的通常是拍糊了/太远/反光——把码拍大一点、正对着再试一次。'
-                  : ''),
+                head +
+                parts.join('，') +
+                '。扫到的都已经列在下面的清单里了。' +
+                (stopped
+                  ? `（为免卡太久先停一下。想继续就再选一次照片——**重复的会自动去重**，不会扫出两份。` +
+                    (failed ? `没解出来的 ${failed} 张在下面的"每张照片结果"里，可以只补拍那几张。` : '') +
+                    '）'
+                  : failed
+                    ? '解不出来的通常是拍糊了/太远/反光——把码拍大一点、正对着再试一次。'
+                    : ''),
             }
           : {
               tone: 'warn',
               text: '这些照片里没有解出二维码或条码。靠近一点、让码填满画面、别反光。',
             },
       );
-    } finally {
-      setBusy('');
-      setProgress('');
     }
   }
 
@@ -680,7 +702,30 @@ export function BookAddPage({ materialId: propId }: { materialId?: string } = {}
               }}
             />
           </label>
+          {busy === 'scan' && (
+            <Button variant="danger" onClick={() => (stopScanRef.current = true)}>
+              停止（保留已扫到的）
+            </Button>
+          )}
         </div>
+
+        {/* 每张照片的结果：用户要知道"差的那一张是哪一张" */}
+        {imgResults.length > 0 && (
+          <div style={{ marginTop: 8 }}>
+            <div className="small faint" style={{ marginBottom: 4 }}>
+              每张照片的结果（{imgResults.filter((r) => r.ok).length} 张成功 /{' '}
+              {imgResults.filter((r) => !r.ok).length} 张没解出）：
+            </div>
+            <div className="col" style={{ gap: 2, maxHeight: 180, overflowY: 'auto' }}>
+              {imgResults.map((r, i) => (
+                <div key={`${r.name}-${i}`} className="small">
+                  {r.ok ? '✅' : '⚠️'} <span className="mono">{r.name}</span>
+                  <span className="faint"> · {r.detail}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {micros.length > 0 && (
           <div style={{ marginTop: 12 }}>

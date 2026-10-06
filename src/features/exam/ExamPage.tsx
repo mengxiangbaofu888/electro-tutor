@@ -375,6 +375,23 @@ export function ExamPage() {
         <Button variant="accent" block loading={busy} onClick={() => submit()}>
           {index < questions.length - 1 ? '交卷' : '交卷批改'}
         </Button>
+        {/* 暂停退出：草稿随时在存，回来能接着做（用户反馈：只能打完直接交卷） */}
+        <Button
+          variant="ghost"
+          block
+          onClick={async () => {
+            try {
+              const payload: Record<string, string[]> = {};
+              for (const q of questions) payload[q.id] = draftRef.current[q.id] ?? [];
+              await saveDraftAnswers(attempt.id, payload);
+            } catch {
+              /* 草稿本来就随时在存，这里失败也不拦着退出 */
+            }
+            navigate('/practice');
+          }}
+        >
+          ⏸ 暂停退出（进度已保存，随时回来接着做）
+        </Button>
       </div>
 
       {!busy && answeredCount < questions.length && (
