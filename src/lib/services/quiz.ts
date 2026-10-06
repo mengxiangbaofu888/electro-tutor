@@ -31,6 +31,15 @@ export interface GenerateQuestionsParams {
   onBatch?: (info: { done: number; total: number; batchIndex: number; batchCount: number }) => void;
   /** 非致命问题的提示（例如有题目格式不完整被跳过） */
   onWarning?: (text: string) => void;
+  /**
+   * 外部控制：暂停与取消（由 generation-runner 提供）。
+   * 暂停**在批次之间**生效（当前这一批做完再停），已出的题不会白费；
+   * 取消则不再开新批次，已经出的题照样入库。
+   */
+  control?: {
+    waitIfPaused?: () => Promise<void>;
+    isCancelled?: () => boolean;
+  };
 }
 
 /** 把模型返回的知识点名称匹配到本地知识点 id */
@@ -203,6 +212,7 @@ export async function generateQuestions(
     onProgress,
     onBatch,
     onWarning,
+    control,
   } = params;
 
   const config = await getDefaultLLM('text');
@@ -235,8 +245,21 @@ export async function generateQuestions(
   const questions: Question[] = [];
   const skippedReasons: string[] = [];
   const batchFailures: string[] = [];
+  let cancelled = false;
 
   for (let i = 0; i < batches.length; i++) {
+    // 取消：不再开新批次（已经出的题在下面照样入库）
+    if (control?.isCancelled?.()) {
+      cancelled = true;
+      break;
+    }
+    // 暂停：在批次之间等（当前这一批做完才停），恢复后继续
+    await control?.waitIfPaused?.();
+    if (control?.isCancelled?.()) {
+      cancelled = true;
+      break;
+    }
+
     const batch = batches[i];
     const batchCount = batch.reduce((sum, a) => sum + a.count, 0);
 
@@ -326,6 +349,13 @@ export async function generateQuestions(
     notes.push(describeBatchFailures(batchFailures));
   }
   if (notes.length) onWarning?.(`${notes.join('；')}。`);
+
+  // 取消时：**不要**把已经出的题丢掉，也不要报"一道都没成"这种吓人的错。
+  // 用户点了取消，就是把已出的交给他。
+  if (cancelled) {
+    if (questions.length) await db.questions.bulkPut(questions);
+    return questions;
+  }
 
   if (!questions.length) {
     throw new Error(

@@ -87,6 +87,26 @@ body {
   margin: 0 auto;
 }
 
+/*
+ * 出题任务的全局横幅：固定在底部导航之上。
+ * 用户可能会切到「我的」「首页」，任务不能因此"看不见"了——
+ * 他要点得到暂停/取消，也要随时知道进度。
+ */
+.generation-banner {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(var(--nav-h) + var(--safe-bottom));
+  z-index: 31;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: rgba(23, 35, 61, 0.98);
+  border-top: 1px solid var(--border);
+  backdrop-filter: blur(12px);
+}
+
 .bottom-nav {
   position: fixed;
   left: 0;

@@ -14,6 +14,7 @@ import { ReportPage } from './features/report/ReportPage';
 import { WrongBookPage } from './features/wrong/WrongBookPage';
 import { KnowledgePage } from './features/knowledge/KnowledgePage';
 import { SettingsPage } from './features/settings/SettingsPage';
+import { GenerationBanner } from './features/practice/GenerationBanner';
 
 const NAV = [
   { to: '/', icon: '🏠', label: '首页' },
@@ -74,6 +75,9 @@ export default function App() {
           <Route path="*" element={<HomePage />} />
         </Routes>
       </main>
+
+      {/* 出题任务在后台跑：不管切到哪个页面都能看到进度、暂停或取消 */}
+      <GenerationBanner />
 
       <nav className="bottom-nav">
         {NAV.map((item) => (

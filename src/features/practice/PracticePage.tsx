@@ -2,15 +2,25 @@
  * 「练习」页：出题、组卷、开始答题。
  * 核心亮点是「自适应出题」——按掌握度自动决定每个知识点出几道。
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { db, getDefaultLLM } from '../../lib/db/db';
 import type { KnowledgePoint, Outline, Question, QuestionType, TrackId } from '../../lib/db/types';
 import { QUESTION_TYPE_LABELS, TRACK_LABELS } from '../../lib/db/types';
 import { getOutlinePoints, listOutlines } from '../../lib/services/outline';
-import { createPaper, generateQuestions, listAllQuestions, startAttempt } from '../../lib/services/quiz';
+import { createPaper, listAllQuestions, startAttempt } from '../../lib/services/quiz';
+import {
+  cancelGeneration,
+  getGenerationState,
+  isGenerationActive,
+  pauseGeneration,
+  resetGeneration,
+  resumeGeneration,
+  startGeneration,
+  subscribeGeneration,
+} from '../../lib/services/generation-runner';
 import { planAdaptiveAllocation } from '../../lib/services/practice';
-import { Alert, Badge, Button, Card, Empty, Field, Loading, Select, TextArea } from '../../components/ui';
+import { Alert, Badge, Button, Card, Empty, Field, Loading, Select, TextArea, TextInput } from '../../components/ui';
 
 const TYPE_ORDER: QuestionType[] = ['single', 'multiple', 'judge', 'blank', 'short', 'calc'];
 
@@ -20,6 +30,45 @@ const DIFFICULTY_OPTIONS = [
   { value: 'hard', label: '偏难：以 3~4 星为主' },
   { value: 'mixed', label: '混合：简单到难都有' },
 ];
+
+/** 常用题量档位。用户反馈"只有一个随机 20 道这一个选项，不够灵活"。 */
+const QUICK_COUNTS = [10, 20, 50, 100];
+
+/**
+ * 「要多少道题」选择器：常用档位 + 自定义数量。
+ * 自定义留了上限（500）并给出提示，避免手滑输入 99999 之后卡半天。
+ */
+function CountPicker({ onPick, busy }: { onPick: (n: number) => void; busy: boolean }) {
+  const [custom, setCustom] = useState('');
+  const customNum = Number(custom);
+  const customOk = custom.trim() !== '' && Number.isFinite(customNum) && customNum > 0 && customNum <= 500;
+
+  return (
+    <div className="col" style={{ gap: 8 }}>
+      <div className="row wrap" style={{ gap: 6 }}>
+        {QUICK_COUNTS.map((n) => (
+          <Button key={n} size="sm" variant="ghost" disabled={busy} onClick={() => onPick(n)}>
+            {n} 道
+          </Button>
+        ))}
+      </div>
+      <div className="row" style={{ gap: 6, alignItems: 'center' }}>
+        <div style={{ width: 110 }}>
+          <TextInput value={custom} placeholder="自定义" type="number" onChange={setCustom} />
+        </div>
+        <Button
+          size="sm"
+          variant="primary"
+          disabled={busy || !customOk}
+          onClick={() => customOk && onPick(Math.round(customNum))}
+        >
+          用这个数
+        </Button>
+        <span className="small faint">1 ~ 500 道</span>
+      </div>
+    </div>
+  );
+}
 
 export function PracticePage() {
   const navigate = useNavigate();
@@ -41,7 +90,11 @@ export function PracticePage() {
   const [track, setTrack] = useState<TrackId>('fundamental');
   const [instruction, setInstruction] = useState('');
   const [busy, setBusy] = useState('');
-  const [stream, setStream] = useState('');
+  // 出题任务跑在模块级单例里（见 services/generation-runner.ts）：
+  // 这里只是订阅它的状态，所以切页面、组件卸载都不影响它。
+  const [gen, setGen] = useState(getGenerationState());
+  useEffect(() => subscribeGeneration(setGen), []);
+  const genActive = isGenerationActive(gen);
   const [message, setMessage] = useState<{ tone: 'ok' | 'error' | 'warn'; text: string } | null>(null);
   const [bankCount, setBankCount] = useState(0);
   const [hasModel, setHasModel] = useState(true);
@@ -130,54 +183,52 @@ export function PracticePage() {
       return;
     }
 
-    setBusy('generate');
-    setStream('');
     setMessage(null);
-    try {
-      const diffText = DIFFICULTY_OPTIONS.find((d) => d.value === difficulty)?.label ?? '标准';
-      let warning = '';
-      // 分批出题：每出一批就把"已出几道 / 共几道"显示出来，
-      // 别让用户对着转圈等 20 道题一次吐完（实测这就是"半天出不来"的来源）。
-      let batchNote = '';
-      const questions = await generateQuestions({
-        outlineId,
-        track,
-        allocation: alloc,
-        typeMix: mix,
-        difficultyMix: `${diffText}${instruction.trim() ? `；额外要求：${instruction.trim()}` : ''}`,
-        withMaterial,
-        onProgress: (d) => setStream((prev) => (prev + d).slice(-3000)),
-        onBatch: ({ done, total, batchIndex, batchCount }) => {
-          batchNote = `正在出题：已出 ${done} / ${total} 道（第 ${batchIndex} / ${batchCount} 批）…`;
-          setMessage({ tone: 'ok', text: batchNote });
-        },
-        onWarning: (text) => {
-          warning = text;
-        },
-      });
-      setMessage({
-        tone: warning ? 'warn' : 'ok',
-        text: warning ? `生成 ${questions.length} 道题。${warning}` : `生成 ${questions.length} 道题。`,
-      });
-      await load();
-
-      if (thenStart && questions.length) {
-        const paper = await createPaper({
-          title: `${outlines?.find((o) => o.id === outlineId)?.title ?? '练习'} · ${new Date().toLocaleDateString('zh-CN')}`,
-          questionIds: questions.map((q) => q.id),
-          durationMin: 0,
-          outlineId,
-          track,
-        });
-        const attempt = await startAttempt(paper);
-        navigate(`/exam/${attempt.id}`);
-      }
-    } catch (e) {
-      setMessage({ tone: 'error', text: e instanceof Error ? e.message : String(e) });
-    } finally {
-      setBusy('');
+    const diffText = DIFFICULTY_OPTIONS.find((d) => d.value === difficulty)?.label ?? '标准';
+    // **交给后台任务跑**：这样切到别的页面也不会中断，而且能暂停/取消。
+    // （用户实测反馈："我点了我的或者首页，回来就没了"、"一开始生成就不能取消了"）
+    const started = startGeneration({
+      outlineId,
+      track,
+      allocation: alloc,
+      typeMix: mix,
+      difficultyMix: `${diffText}${instruction.trim() ? `；额外要求：${instruction.trim()}` : ''}`,
+      withMaterial,
+      thenStart,
+    });
+    if (!started) {
+      setMessage({ tone: 'warn', text: '已经有一个出题任务在跑了，等它结束或先取消它。' });
     }
   }
+
+  /** 出题完成后的收尾：刷新题库；如果用户要求"生成并开始答题"，就组卷进考场 */
+  const finishRef = useRef(false);
+  useEffect(() => {
+    if (gen.status !== 'done') {
+      finishRef.current = false;
+      return;
+    }
+    if (finishRef.current) return;
+    finishRef.current = true;
+    void (async () => {
+      await load();
+      if (gen.thenStart && gen.questions.length) {
+        try {
+          const paper = await createPaper({
+            title: `${outlines?.find((o) => o.id === outlineId)?.title ?? '练习'} · ${new Date().toLocaleDateString('zh-CN')}`,
+            questionIds: gen.questions.map((q) => q.id),
+            durationMin: 0,
+            outlineId,
+            track,
+          });
+          const attempt = await startAttempt(paper);
+          navigate(`/exam/${attempt.id}`);
+        } catch (e) {
+          setMessage({ tone: 'error', text: e instanceof Error ? e.message : String(e) });
+        }
+      }
+    })();
+  }, [gen.status]);
 
   /** 用题库里已有的题直接组卷 */
   async function practiceFromBank(count: number) {
@@ -304,10 +355,15 @@ export function PracticePage() {
             <div className="row between" style={{ marginTop: 10 }}>
               <span className="small muted">共 {totalQuestions} 道</span>
               {adaptive && (
-                <Button size="sm" variant="ghost" onClick={() => refreshAdaptive(20)}>
-                  自适应推荐 20 道
-                </Button>
+                <span className="small faint">按掌握度自动铺开</span>
               )}
+            </div>
+            {/* 题量：常用档位 + 自定义（用户反馈"只有一个 20 道不够灵活"） */}
+            <div style={{ marginTop: 8 }}>
+              <div className="small faint" style={{ marginBottom: 6 }}>
+                要多少道？点一下按掌握度重新铺开（专挑弱的先练）：
+              </div>
+              <CountPicker busy={false} onPick={(n) => void refreshAdaptive(n)} />
             </div>
           </Card>
 
@@ -358,20 +414,13 @@ export function PracticePage() {
             </label>
           </Card>
 
-          {busy === 'generate' && stream && (
-            <Card title="模型正在出题（实时预览）">
-              <div className="small mono pre-wrap" style={{ maxHeight: 200, overflowY: 'auto' }}>
-                {stream}
-              </div>
-            </Card>
-          )}
+          {/* 出题进度改由下面的「出题任务」卡片显示（有批次进度，比刷原始 JSON 清楚） */}
 
           <div className="action-bar">
             <Button
               variant="ghost"
               block
-              loading={busy === 'generate'}
-              disabled={!totalQuestions || !typeTotal}
+              disabled={!totalQuestions || !typeTotal || genActive}
               onClick={() => doGenerate(false)}
             >
               只生成题目
@@ -379,25 +428,61 @@ export function PracticePage() {
             <Button
               variant="accent"
               block
-              loading={busy === 'generate'}
-              disabled={!totalQuestions || !typeTotal}
+              disabled={!totalQuestions || !typeTotal || genActive}
               onClick={() => doGenerate(true)}
             >
               生成并开始答题
             </Button>
           </div>
 
+          {/* 出题任务的状态与操作：切到别的页面也在跑，随时可以暂停/取消 */}
+          {(genActive || gen.status === 'done' || gen.status === 'cancelled' || gen.status === 'error') && (
+            <Card
+              title="⏳ 出题任务"
+              extra={
+                <Badge tone={gen.status === 'error' ? undefined : 'primary'}>
+                  {genActive ? (gen.status === 'paused' ? '已暂停' : '进行中') : gen.status === 'done' ? '已完成' : gen.status === 'cancelled' ? '已取消' : '失败'}
+                </Badge>
+              }
+            >
+              <div className="small">{gen.note || (genActive ? '正在准备…' : '')}</div>
+              {gen.message && <Alert tone={gen.status === 'error' ? 'error' : 'warn'}>{gen.message}</Alert>}
+              <div className="btn-row" style={{ marginTop: 8 }}>
+                {gen.status === 'running' && (
+                  <Button size="sm" variant="ghost" onClick={pauseGeneration}>
+                    暂停
+                  </Button>
+                )}
+                {gen.status === 'paused' && (
+                  <Button size="sm" variant="primary" onClick={resumeGeneration}>
+                    继续
+                  </Button>
+                )}
+                {genActive && (
+                  <Button size="sm" variant="danger" onClick={cancelGeneration}>
+                    取消（保留已出的题）
+                  </Button>
+                )}
+                {!genActive && (
+                  <Button size="sm" variant="ghost" onClick={resetGeneration}>
+                    知道了
+                  </Button>
+                )}
+              </div>
+              {genActive && (
+                <p className="small faint" style={{ marginTop: 6, marginBottom: 0 }}>
+                  可以放心切到别的页面，出题会继续；回来后进度还在。
+                </p>
+              )}
+            </Card>
+          )}
+
           <Card title="📚 题库直接练习" extra={<Badge>{bankCount} 道</Badge>}>
             <p className="small muted" style={{ marginTop: 0 }}>
               不调用大模型，直接从已有题目里抽题做，省 token 也更快。
             </p>
-            <div className="btn-row">
-              <Button loading={busy === 'bank'} onClick={() => practiceFromBank(10)}>
-                随机 10 题
-              </Button>
-              <Button variant="ghost" loading={busy === 'bank'} onClick={() => practiceFromBank(20)}>
-                随机 20 题
-              </Button>
+            <CountPicker busy={busy === 'bank'} onPick={(n) => void practiceFromBank(n)} />
+            <div className="btn-row" style={{ marginTop: 8 }}>
               <Button variant="ghost" onClick={() => navigate('/wrong')}>
                 只练错题
               </Button>
