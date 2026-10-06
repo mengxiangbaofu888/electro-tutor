@@ -95,22 +95,39 @@ export function TextInput({
   placeholder,
   type = 'text',
   password,
+  secret,
   onBlur,
 }: {
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
   type?: string;
+  /**
+   * 真正的密码框（`type="password"`）。
+   * ⚠️ 安卓上它会唤起**系统安全键盘**（没有剪贴板、不能长按粘贴），
+   * 所以需要粘贴长内容（比如 API Key）的地方**不要用它**，改用 `secret`。
+   */
   password?: boolean;
+  /**
+   * "看起来是密码，但键盘是普通键盘"：CSS 打码，输入框类型仍是 text。
+   *
+   * 起因是真实反馈："填 API Key 时那个键盘是手机系统的安全键盘，没有剪贴板，
+   * API Key 那么长你让我一个手敲吗？"
+   * 换成 CSS 打码后，长按粘贴/剪贴板/联想输入都正常，旁边的人依然看不到内容。
+   */
+  secret?: boolean;
   /** 失焦时触发：用于"填完 Key 就自动联网拉模型列表"这类动作 */
   onBlur?: () => void;
 }) {
   return (
     <input
       type={password ? 'password' : type}
+      className={secret && !password ? 'input-secret' : undefined}
       value={value}
       placeholder={placeholder}
-      autoComplete={password ? 'off' : undefined}
+      autoComplete={password || secret ? 'off' : undefined}
+      autoCorrect="off"
+      spellCheck={false}
       onChange={(e: ChangeEvent<HTMLInputElement>) => onChange(e.target.value)}
       onBlur={onBlur}
     />

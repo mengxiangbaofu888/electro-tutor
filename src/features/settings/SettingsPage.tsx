@@ -47,6 +47,8 @@ export function SettingsPage() {
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState<{ tone: 'ok' | 'error' | 'warn'; text: string } | null>(null);
   const [modelList, setModelList] = useState<string[]>([]);
+  /** API Key 是否明文显示（默认打码；核对时可以让用户看清） */
+  const [showKey, setShowKey] = useState(false);
   const [stats, setStats] = useState({ materials: 0, questions: 0, attempts: 0, points: 0 });
 
   async function reload() {
@@ -141,8 +143,34 @@ export function SettingsPage() {
     }
   }
 
-  async function doListModels() {
+  /**
+   * 从剪贴板粘贴 API Key。
+   *
+   * 为什么需要：安卓的密码框会唤起系统安全键盘，那种键盘**没有剪贴板**，
+   * 而 API Key 又长又不可能手敲。现在输入框是普通键盘（能长按粘贴），
+   * 这个按钮让"一下就好"更省事；万一系统不允许读剪贴板，也会告诉他改用长按粘贴。
+   */
+  async function pasteApiKey() {
     if (!editing) return;
+    try {
+      const text = (await navigator.clipboard?.readText?.()) ?? '';
+      if (!text.trim()) {
+        setMessage({ tone: 'warn', text: '剪贴板是空的：先把 Key 复制一下，再回来点这个按钮。' });
+        return;
+      }
+      setEditing({ ...editing, apiKey: text.trim() });
+      setMessage({ tone: 'ok', text: '已从剪贴板粘贴 API Key，记得点保存。' });
+    } catch {
+      setMessage({
+        tone: 'warn',
+        text:
+          '系统不允许 App 直接读剪贴板。可以点输入框**长按 → 粘贴**' +
+          '（现在是普通键盘，长按会有粘贴菜单）。',
+      });
+    }
+  }
+
+  async function doListModels() {    if (!editing) return;
     setBusy('models');
     setMessage(null);
     try {
@@ -485,7 +513,10 @@ export function SettingsPage() {
               hint="只保存在这台手机本地，不会上传。填完会自动联网读一次可用模型列表。"
             >
               <TextInput
-                password
+                // 这里**故意不用** type="password"：安卓上它会唤起系统安全键盘
+                // （没有剪贴板、不能长按粘贴），而这串 Key 又长又难敲。
+                // 改成 CSS 打码：看着是圆点，键盘却是普通键盘，能粘贴。
+                secret={!showKey}
                 value={editing.apiKey}
                 placeholder={editing.kind === 'vision' ? '服务商的 Key（识图和文本通常同一个）' : 'sk-...'}
                 onChange={(v) => setEditing({ ...editing, apiKey: v })}
@@ -494,6 +525,18 @@ export function SettingsPage() {
                 }}
               />
             </Field>
+            <div className="btn-row" style={{ marginTop: -6 }}>
+              <Button size="sm" variant="primary" onClick={() => void pasteApiKey()}>
+                📋 粘贴剪贴板里的 Key
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setShowKey((v) => !v)}>
+                {showKey ? '隐藏' : '显示（核对用）'}
+              </Button>
+            </div>
+            <p className="small faint" style={{ marginTop: 4 }}>
+              安卓上密码框会换成"系统安全键盘"，那种键盘**没有剪贴板**，长 Key 只能手敲。
+              这里已经改成普通键盘：可以长按粘贴，也可以点上面的「粘贴」按钮。
+            </p>
 
             <Field
               label="② 接口地址"

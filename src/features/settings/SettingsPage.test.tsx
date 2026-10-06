@@ -59,13 +59,31 @@ describe('模型配置：用户要能自己填 Key、自己选模型', () => {
     expect(screen.getByText('🔑 填 API Key（从这里开始）')).toBeTruthy();
   });
 
-  it('弹层里第一个字段就是 API Key，而且是密码框', async () => {
+  it('API Key 字段要"看着是密码、但键盘是普通键盘"（安卓安全键盘没有剪贴板）', async () => {
     await openSheet();
     const keyLabel = screen.getByText('① API Key');
     const field = keyLabel.closest('.field') as HTMLElement;
     const input = field.querySelector('input') as HTMLInputElement;
     expect(input).toBeTruthy();
-    expect(input.type).toBe('password'); // 不该明文显示
+    // **不能**用 type="password"：安卓上它唤起系统安全键盘，没有剪贴板，
+    // 而 API Key 又长又不可能手敲（这是用户的真实反馈）
+    expect(input.type).not.toBe('password');
+    // 但要靠 CSS 打码，别让旁边的人看到
+    expect(input.className).toContain('input-secret');
+  });
+
+  it('有「粘贴剪贴板里的 Key」按钮，点了能把剪贴板内容填进去', async () => {
+    const readText = vi.fn(async () => '  sk-pasted-123  ');
+    Object.defineProperty(navigator, 'clipboard', { value: { readText }, configurable: true });
+    await openSheet();
+
+    fireEvent.click(screen.getByText(/粘贴剪贴板里的 Key/));
+    // 同一条提示在弹层和页面上各显示一次，所以用 findAllByText
+    expect((await screen.findAllByText(/已从剪贴板粘贴/)).length).toBeGreaterThan(0);
+
+    const field = screen.getByText('① API Key').closest('.field') as HTMLElement;
+    const input = field.querySelector('input') as HTMLInputElement;
+    expect(input.value).toBe('sk-pasted-123'); // 顺带去掉首尾空白
   });
 
   it('不再预先填死一个模型：打开时是空的，让用户自己选', async () => {
